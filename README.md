@@ -1,5 +1,14 @@
 # POWERGRID SmartOps Assistant — Deployment Guide
 
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Frontend-61DAFB?logo=react&logoColor=0B1F2A)
+![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?logo=typescript&logoColor=white)
+![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-UI-06B6D4?logo=tailwindcss&logoColor=white)
+![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?logo=firebase&logoColor=black)
+![Railway](https://img.shields.io/badge/Railway-Backend_Hosting-0B0D0E?logo=railway&logoColor=white)
+![Vercel](https://img.shields.io/badge/Vercel-Frontend_Hosting-000000?logo=vercel&logoColor=white)
+![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-F97316)
+
 > **Production-grade RAG system** for POWERGRID operations knowledge management.  
 > Frontend → **Vercel** | Backend → **Railway** | Database → **Firebase Firestore**
 
@@ -17,6 +26,12 @@
 │  Zustand     │                │  LangChain       │                   │  Settings  │
 └──────────────┘                └──────────────────┘                   └───────────┘
 ```
+
+## Current Validation Snapshot
+
+- Live smoke checks passing: `/ping`, `/api/v1/health`, `/api/v1/metadata/options`, `/api/v1/query`
+- End-to-end workflow verified: document upload → query with citations → document delete
+- Frontend to backend auth supported via `X-API-Key` header when `BACKEND_API_KEY` is configured
 
 ---
 
@@ -86,9 +101,15 @@ Set these in **Variables** tab:
 | `DEFAULT_LLM_PROVIDER` | `gemini` | ✅ |
 | `DEFAULT_LLM_MODEL` | `gemini-1.5-flash` | ✅ |
 | `SECRET_KEY` | Random 64-char string | ✅ |
+| `BACKEND_API_KEY` | Strong random API key for frontend-backend auth | Recommended |
+| `ENABLE_RATE_LIMITING` | `true` | Recommended |
+| `RATE_LIMIT_REQUESTS` | `100` | Recommended |
+| `RATE_LIMIT_WINDOW` | `3600` | Recommended |
 | `ENVIRONMENT` | `production` | ✅ |
 | `GROQ_API_KEY` | Your Groq key (if using Groq) | ❌ |
 | `LOG_LEVEL` | `INFO` | ❌ |
+
+If `BACKEND_API_KEY` is configured, all non-exempt API routes require the `X-API-Key` request header.
 
 > **Tip**: To paste Firebase credentials as a single line, run:
 > ```bash
@@ -119,6 +140,7 @@ curl https://your-railway-url.up.railway.app/api/v1/health
 | Variable | Value |
 |---|---|
 | `VITE_API_URL` | `https://your-railway-url.up.railway.app/api/v1` |
+| `VITE_BACKEND_API_KEY` | Same value as Railway `BACKEND_API_KEY` |
 
 ### Verify
 Visit your Vercel URL → you should see the GridIntel dashboard.
@@ -129,16 +151,21 @@ Visit your Vercel URL → you should see the GridIntel dashboard.
 
 ### Backend
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+# From repository root
+python -m venv .venv
 
-# Create .env from template
-cp .env.example .env
-# Edit .env with your API keys
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
 
-python -m app.main
+pip install -r backend/requirements.txt
+
+# Create backend .env from template
+copy backend\.env.example backend\.env  # Windows
+# cp backend/.env.example backend/.env    # macOS/Linux
+
+uvicorn app.main:app --app-dir backend --reload --port 8000
 # → Running on http://localhost:8000
 # → Docs at http://localhost:8000/docs
 ```
@@ -210,6 +237,8 @@ powergrid-rag/
 
 ## API Endpoints Reference
 
+When `BACKEND_API_KEY` is set, include `X-API-Key: <your-key>` in client requests to `/api/v1/*` endpoints.
+
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/query` | RAG query with citations |
@@ -222,6 +251,7 @@ powergrid-rag/
 | `GET` | `/api/v1/chat/sessions` | List all chat sessions |
 | `GET` | `/api/v1/settings` | Get user settings |
 | `POST` | `/api/v1/settings` | Save user settings |
+| `GET` | `/api/v1/metadata/options` | Get filter/upload metadata options |
 | `GET` | `/api/v1/health` | Health check |
 | `GET` | `/api/v1/stats` | System statistics |
 | `GET` | `/ping` | Load balancer ping |
@@ -245,6 +275,14 @@ powergrid-rag/
 - Subsequent requests are fast (<2s for queries)
 - Railway Starter tier ($5/mo) keeps the service warm
 
+### 401 Unauthorized from API routes
+- Set the same value for Railway `BACKEND_API_KEY` and Vercel `VITE_BACKEND_API_KEY`
+- Ensure requests send `X-API-Key` header (frontend does this automatically when configured)
+
 ### Document upload fails
 - Check file type is `.pdf`, `.docx`, `.doc`, or `.txt`
 - Max file size is 50MB (configurable via `MAX_UPLOAD_SIZE_MB`)
+
+### Python dependency resolution fails during setup
+- Upgrade pip tooling first: `python -m pip install --upgrade pip setuptools wheel`
+- Re-run: `pip install -r backend/requirements.txt`

@@ -19,15 +19,15 @@ const Home = () => {
   return (
     <>
       {/* Hero Section */}
-      <section className="p-8">
-        <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-primary to-primary-container p-12 text-on-primary">
+      <section className="p-4 md:p-8">
+        <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-primary to-primary-container p-6 text-on-primary md:p-12">
           <div className="relative z-10 max-w-2xl">
             <span className="font-label text-xs uppercase tracking-[0.2em] opacity-80 mb-4 block">Operation Dashboard</span>
-            <h2 className="text-5xl font-black font-headline tracking-tighter mb-6 leading-none">Welcome, Chief Engineer</h2>
+            <h2 className="mb-6 font-headline text-4xl font-black leading-none tracking-tighter md:text-5xl">Welcome, Chief Engineer</h2>
             <p className="text-lg opacity-90 font-light leading-relaxed mb-8">
               POWERGRID Intelligence is {isOnline ? 'synchronized' : 'connecting'}. {isOnline ? `Access ${totalChunks} indexed knowledge chunks, real-time grid diagnostics, and maintenance protocols instantly.` : 'Start the backend server to enable AI-powered queries.'}
             </p>
-            <div className="flex gap-4">
+            <div className="flex flex-wrap gap-4">
               <button
                 onClick={() => navigate('/chat')}
                 className="bg-surface-container-lowest text-primary px-6 py-3 font-bold rounded-lg flex items-center hover:bg-blue-50 transition-all"
@@ -53,7 +53,7 @@ const Home = () => {
       </section>
 
       {/* Bento Grid Quick Actions */}
-      <section className="px-8 pb-12">
+      <section className="px-4 pb-8 md:px-8 md:pb-12">
         <div className="flex justify-between items-end mb-8">
           <div>
             <h3 className="text-2xl font-bold font-headline tracking-tight text-on-surface">Knowledge Hub</h3>
@@ -63,16 +63,16 @@ const Home = () => {
             Expand Repository <span className="material-symbols-outlined ml-1 text-sm">open_in_new</span>
           </button>
         </div>
-        <div className="grid grid-cols-12 gap-6">
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
           {/* Large Card: Technical Manuals */}
           <div
             onClick={() => navigate('/knowledge-base')}
-            className="col-span-8 bg-surface-container-lowest p-8 rounded-xl shadow-sm hover:shadow-md transition-shadow group flex items-start gap-8 cursor-pointer"
+            className="col-span-1 cursor-pointer gap-6 rounded-xl bg-surface-container-lowest p-6 shadow-sm transition-shadow hover:shadow-md md:col-span-8 md:flex md:items-start md:gap-8 md:p-8"
           >
-            <div className="w-1/3 h-48 rounded-lg overflow-hidden shrink-0">
+            <div className="h-48 w-full shrink-0 overflow-hidden rounded-lg md:h-48 md:w-1/3">
               <img className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCl7e0vtY8bmVFAWPkNZeuKmMzl6-tOGvJaILQNOzNfJlHKv8oxUBAdpPDGBzH1_TgSeOdnpSoy-4_jpoe_dYeaJ2kg1zMUdgVox2nYeSxwqr6I4DGaLLduBQWO3EXA3qHLy-eeJOsx69p-j-GmKY7VzeWFOCy1hMfjtMsLVIPx7owL-JRjOF-P5MuMVrWHzF3EsI0LdM9hur_cgDsyQRJMg67XdYUXI-S5EZYon2PqeJD3YJm9R3NzrUs2Yf13U3hfsWgmVV7hh7-x" alt="Manual" />
             </div>
-            <div className="flex-1 flex flex-col justify-between h-full">
+            <div className="flex h-full flex-1 flex-col justify-between">
               <div>
                 <div className="flex items-center gap-2 mb-3">
                   <span className="bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded-sm font-label text-[10px] uppercase font-bold">Standard OP</span>
@@ -90,7 +90,7 @@ const Home = () => {
           </div>
 
           {/* Vertical Card: Maintenance */}
-          <div className="col-span-4 bg-surface-container-high p-8 rounded-xl flex flex-col justify-between">
+          <div className="col-span-1 flex flex-col justify-between rounded-xl bg-surface-container-high p-6 md:col-span-4 md:p-8">
             <div>
               <div className="p-3 bg-primary text-on-primary w-fit rounded-lg mb-6">
                 <span className="material-symbols-outlined">calendar_today</span>
@@ -115,17 +115,17 @@ const Home = () => {
           </div>
 
           {/* Small Cards */}
-          <div onClick={() => navigate('/knowledge-base')} className="col-span-4 bg-surface-container-low p-6 rounded-xl hover:bg-surface-container-high transition-colors cursor-pointer">
+          <div onClick={() => navigate('/knowledge-base')} className="col-span-1 cursor-pointer rounded-xl bg-surface-container-low p-6 transition-colors hover:bg-surface-container-high md:col-span-4">
             <span className="material-symbols-outlined text-primary mb-4">verified_user</span>
             <h5 className="font-bold mb-1">Safety Protocols</h5>
             <p className="text-xs text-on-surface-variant">Current OSHA and Grid-Specific safety mandates for field crew.</p>
           </div>
-          <div onClick={() => navigate('/chat')} className="col-span-4 bg-surface-container-low p-6 rounded-xl hover:bg-surface-container-high transition-colors cursor-pointer">
+          <div onClick={() => navigate('/chat')} className="col-span-1 cursor-pointer rounded-xl bg-surface-container-low p-6 transition-colors hover:bg-surface-container-high md:col-span-4">
             <span className="material-symbols-outlined text-primary mb-4">analytics</span>
             <h5 className="font-bold mb-1">Live Diagnostics</h5>
             <p className="text-xs text-on-surface-variant">Real-time load balancing data and thermal variance reports.</p>
           </div>
-          <div onClick={() => navigate('/chat')} className="col-span-4 bg-surface-container-low p-6 rounded-xl hover:bg-surface-container-high transition-colors cursor-pointer">
+          <div onClick={() => navigate('/chat')} className="col-span-1 cursor-pointer rounded-xl bg-surface-container-low p-6 transition-colors hover:bg-surface-container-high md:col-span-4">
             <span className="material-symbols-outlined text-primary mb-4">history_edu</span>
             <h5 className="font-bold mb-1">Incident Archive</h5>
             <p className="text-xs text-on-surface-variant">Historical post-mortem reports and mitigation strategies.</p>
@@ -134,7 +134,7 @@ const Home = () => {
       </section>
 
       {/* Recent Activity Section — LIVE */}
-      <section className="px-8 pb-12">
+      <section className="px-4 pb-8 md:px-8 md:pb-12">
         <div className="bg-surface-container-lowest rounded-xl shadow-sm p-8">
           <div className="flex items-center justify-between mb-8">
             <h3 className="text-xl font-bold font-headline tracking-tight">Recent Knowledge Activity</h3>
@@ -189,15 +189,15 @@ const Home = () => {
       </section>
 
       {/* AI Floating Button */}
-      <div className="fixed bottom-8 right-8 z-50">
+      <div className="fixed bottom-6 right-4 z-50 md:bottom-8 md:right-8">
         <div className="relative group">
           <div className="absolute -inset-1 bg-gradient-to-r from-primary to-secondary rounded-full blur opacity-25 group-hover:opacity-75 transition duration-1000 group-hover:duration-200"></div>
           <button
             onClick={() => navigate('/chat')}
-            className="relative bg-primary text-on-primary flex items-center gap-3 px-6 py-4 rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all"
+            className="relative flex items-center gap-3 rounded-full bg-primary px-5 py-3 text-on-primary shadow-2xl transition-all hover:scale-105 active:scale-95 md:px-6 md:py-4"
           >
             <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>smart_toy</span>
-            <span className="font-bold tracking-tight">Ask GridIntel AI</span>
+            <span className="font-bold tracking-tight text-sm md:text-base">Ask GridIntel AI</span>
           </button>
         </div>
       </div>

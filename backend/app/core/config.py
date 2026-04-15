@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     MAX_CITATIONS: int = 3
 
     # Rate Limiting
+    ENABLE_RATE_LIMITING: bool = True
     RATE_LIMIT_REQUESTS: int = 100
     RATE_LIMIT_WINDOW: int = 3600
 
@@ -72,6 +73,8 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: Optional[str] = None
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    BACKEND_API_KEY: Optional[str] = None
+    API_KEY_HEADER: str = "X-API-Key"
 
     # Firebase (JSON string of service account credentials)
     FIREBASE_CREDENTIALS: Optional[str] = None

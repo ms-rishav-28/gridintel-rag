@@ -2,11 +2,13 @@ import axios from 'axios'
 import toast from 'react-hot-toast'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
+const API_KEY = import.meta.env.VITE_BACKEND_API_KEY
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
+    ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
   },
   timeout: 120000, // 120 seconds — LLM + embedding can be slow on cold start
 })
@@ -86,6 +88,8 @@ export interface HealthResponse {
     total_documents: number
     collection_name: string
     embedding_model: string
+    status?: string
+    error?: string
   }
   llm_provider: string
   llm_model: string
@@ -124,6 +128,17 @@ export interface UserSettings {
   theme?: string
   notifications?: { critical: boolean; insights: boolean }
   profile?: { name?: string; designation?: string; email?: string }
+}
+
+export interface MetadataOption {
+  value: string
+  label: string
+}
+
+export interface MetadataOptionsResponse {
+  equipment_types: MetadataOption[]
+  voltage_levels: MetadataOption[]
+  document_types: MetadataOption[]
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -240,5 +255,10 @@ export async function getStats(): Promise<{
   }
 }> {
   const response = await api.get('/stats')
+  return response.data
+}
+
+export async function getMetadataOptions(): Promise<MetadataOptionsResponse> {
+  const response = await api.get<MetadataOptionsResponse>('/metadata/options')
   return response.data
 }

@@ -1,304 +1,176 @@
-# POWERGRID RAG - Team Development Guide
+# POWERGRID SmartOps - Team Development Guide
 
-## Development Team Structure
+![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-UI-61DAFB?logo=react&logoColor=0B1F2A)
+![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?logo=typescript&logoColor=white)
+![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?logo=firebase&logoColor=black)
+![Railway](https://img.shields.io/badge/Railway-Backend_Hosting-0B0D0E?logo=railway&logoColor=white)
+![Vercel](https://img.shields.io/badge/Vercel-Frontend_Hosting-000000?logo=vercel&logoColor=white)
+
+## Team Ownership
 
 ### Backend Team
-**Focus Areas:**
-- Document processing pipeline
-- Vector store management
-- RAG engine logic
-- LLM integrations
-- API development
+Focus areas:
+- RAG query orchestration and fallback flow
+- Document processing and ingestion
+- Vector indexing and retrieval behavior
+- API guardrails (auth, rate limiting, request context)
 
-**Key Files:**
-- `backend/app/services/rag_engine.py` - Core RAG logic
-- `backend/app/services/document_processor.py` - Document ingestion
-- `backend/app/services/vector_store.py` - ChromaDB operations
-- `backend/app/services/llm_service.py` - LLM providers (Gemini/Groq)
-- `backend/app/api/routes.py` - API endpoints
+Key files:
+- `backend/app/api/routes.py` - API endpoints and dependency guardrails
+- `backend/app/api/models.py` - Shared enums and request/response contracts
+- `backend/app/services/rag_engine.py` - Query pipeline and retrieval flow
+- `backend/app/services/vector_store.py` - ChromaDB indexing, filtering, deletion
+- `backend/app/services/document_processor.py` - File parsing and chunk generation
+- `backend/app/core/security.py` - API key and in-memory rate limiter
 
 ### Frontend Team
-**Focus Areas:**
-- React UI components
-- Query interface
-- Document upload interface
-- API integration
-- User experience
+Focus areas:
+- Dashboard and operational UX
+- Chat workflow with metadata filters and citations
+- Knowledge base upload/list/delete flows
+- Settings + health visibility
 
-**Key Files:**
-- `frontend/src/pages/QueryPage.tsx` - Main search interface
-- `frontend/src/pages/UploadPage.tsx` - Document upload
-- `frontend/src/pages/StatusPage.tsx` - System monitoring
-- `frontend/src/lib/api.ts` - Backend API client
-- `frontend/src/components/Layout.tsx` - App layout
+Key files:
+- `frontend/src/pages/Home.tsx` - Operational dashboard and quick actions
+- `frontend/src/pages/Chat.tsx` - Main RAG chat experience
+- `frontend/src/pages/KnowledgeBase.tsx` - Upload, list, and delete documents
+- `frontend/src/pages/Settings.tsx` - Service health and user/system settings
+- `frontend/src/lib/api.ts` - Typed API client and request headers
+- `frontend/src/stores/chatStore.ts` - Chat/session state and persistence
+- `frontend/src/stores/knowledgeStore.ts` - Docs, stats, settings state
 
-### DevOps Team
-**Focus Areas:**
-- Docker deployment
-- Environment setup
-- Monitoring and logging
-- CI/CD pipelines
+### Platform and DevOps Team
+Focus areas:
+- Railway backend runtime health
+- Vercel frontend deployment and environment management
+- Firebase Firestore credentials and retention controls
+- Build reliability, logs, and smoke validation
 
-**Key Files:**
-- `Dockerfile` - Multi-stage build
-- `docker-compose.yml` - Local orchestration
-- `backend/app/core/logging.py` - Structured logging
+Key files:
+- `backend/railway.json` - Railway service config
+- `backend/Procfile` - Gunicorn process command
+- `frontend/vercel.json` - Vercel routing and security headers
+- `docker-compose.yml` - Local container orchestration
+- `Dockerfile` - Combined image for local/prod workflows
 
-## Development Workflow
+## Local Development Workflow
 
-### 1. Setting Up Local Environment
+### 1) Environment setup
 
 ```bash
-# Clone and enter project
-cd "powergrid RAG"
+# From repository root
+python -m venv .venv
 
-# Backend setup
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env with your API keys
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
 
-# Frontend setup
-cd ../frontend
+pip install -r backend/requirements.txt
+
+# Backend env
+copy backend\.env.example backend\.env  # Windows
+# cp backend/.env.example backend/.env    # macOS/Linux
+
+# Frontend deps
+cd frontend
 npm install
+cd ..
 ```
 
-### 2. Running Development Servers
+### 2) Run local services
 
 ```bash
-# Terminal 1: Backend
-cd backend
-uvicorn app.main:app --reload --port 8000
+# Terminal A (backend)
+uvicorn app.main:app --app-dir backend --reload --port 8000
 
-# Terminal 2: Frontend
+# Terminal B (frontend)
 cd frontend
 npm run dev
 ```
 
-Access:
+Local URLs:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
+- OpenAPI docs: http://localhost:8000/docs
 
-### 3. Testing Document Upload
-
-```bash
-# Using curl
-curl -X POST http://localhost:8000/api/v1/documents/upload \
-  -F "file=@path/to/your/document.pdf" \
-  -F "doc_type=TECHNICAL_MANUAL" \
-  -F "equipment_type=CIRCUIT_BREAKER"
-```
-
-### 4. Testing RAG Query
+### 3) Smoke validation
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What is the maintenance interval for a 220 kV circuit breaker?",
-    "use_fallback": true
-  }'
+curl http://localhost:8000/ping
+curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/api/v1/metadata/options
 ```
 
-## Code Standards
+If `BACKEND_API_KEY` is set, include `X-API-Key` in requests to protected API routes.
 
-### Backend (Python)
-
-- Use type hints for all function signatures
-- Follow PEP 8 style guide
-- Add docstrings for all public functions
-- Use structured logging via `structlog`
-- Handle exceptions with custom exception classes
-
-Example:
-```python
-from app.core.logging import get_logger
-from app.core.exceptions import RAGQueryError
-
-logger = get_logger(__name__)
-
-async def process_query(question: str) -> dict:
-    """Process a RAG query.
-    
-    Args:
-        question: The user's question
-        
-    Returns:
-        dict containing answer and citations
-        
-    Raises:
-        RAGQueryError: If query processing fails
-    """
-    try:
-        logger.info("processing_query", question=question[:50])
-        # ... logic ...
-    except Exception as e:
-        logger.error("query_failed", error=str(e))
-        raise RAGQueryError(f"Failed to process: {str(e)}")
-```
-
-### Frontend (TypeScript/React)
-
-- Use TypeScript for type safety
-- Follow functional component pattern with hooks
-- Use Tailwind CSS for styling
-- Implement error boundaries for error handling
-- Use `zustand` for state management (when needed)
-
-Example:
-```tsx
-import { useState } from 'react'
-import { cn } from '../lib/utils'
-
-interface QueryFormProps {
-  onSubmit: (query: string) => void
-  loading: boolean
-}
-
-export function QueryForm({ onSubmit, loading }: QueryFormProps) {
-  const [query, setQuery] = useState('')
-  
-  return (
-    <form onSubmit={() => onSubmit(query)}>
-      {/* ... */}
-    </form>
-  )
-}
-```
-
-## Architecture Patterns
-
-### RAG Pipeline
-
-```
-User Query → Filter Builder → Vector Search → LLM Generation → Cited Answer
-                ↓                    ↓
-          Equipment Type       Relevance Scoring
-          Voltage Level        Context Assembly
-          Doc Types            Fallback Logic
-```
-
-### Document Processing
-
-```
-PDF/DOCX → Text Extraction → Chunking → Embedding → Vector Store
-                ↓                ↓           ↓
-          PyPDF/Docx2txt   Recursive    HuggingFace
-                           Splitter     Embeddings
-```
-
-## Adding Features
-
-### Adding New Equipment Type
-
-1. **Backend** - `backend/app/core/config.py`:
-```python
-class EquipmentType(str, Enum):
-    # ... existing types ...
-    NEW_EQUIPMENT = "NEW_EQUIPMENT"
-```
-
-2. **Frontend** - `frontend/src/lib/utils.ts`:
-```typescript
-export const EQUIPMENT_TYPES = [
-  // ... existing ...
-  { value: 'NEW_EQUIPMENT', label: 'New Equipment' },
-] as const
-```
-
-3. **Document Processor** - `backend/app/services/document_processor.py`:
-```python
-equipment_keywords = {
-    # ... existing ...
-    'new_keyword': 'NEW_EQUIPMENT',
-}
-```
-
-### Adding New LLM Provider
-
-1. Update `backend/app/services/llm_service.py`:
-```python
-elif self.provider == "new_provider":
-    return NewProviderLLM(
-        model=self.model_name,
-        api_key=settings.NEW_PROVIDER_KEY,
-    )
-```
-
-2. Add configuration to `backend/app/core/config.py`
-
-3. Update environment variables
-
-## Testing Strategy
-
-### Unit Tests (Backend)
-```bash
-cd backend
-pytest tests/ -v
-```
-
-### Integration Tests
-```bash
-# Start services
-docker-compose up -d
-
-# Run integration tests
-pytest tests/integration/ -v
-```
-
-### Frontend Testing
-```bash
-cd frontend
-npm run test
-```
-
-## Deployment Checklist
-
-- [ ] Set production API keys in `.env`
-- [ ] Configure `ENVIRONMENT=production`
-- [ ] Set `DEBUG=false`
-- [ ] Update `SECRET_KEY` (generate new)
-- [ ] Configure backup for `/app/data` volume
-- [ ] Set up monitoring/alerting
-- [ ] Test document upload
-- [ ] Test RAG query flow
-- [ ] Verify citation accuracy
-
-## Common Issues
+## Coding Standards
 
 ### Backend
-
-**Issue**: ChromaDB persistence errors
-**Fix**: Ensure `data/chroma_db` directory exists and is writable
-
-**Issue**: LLM timeout
-**Fix**: Increase `timeout` in `api.py` or use faster model
-
-**Issue**: Out of memory during embedding
-**Fix**: Reduce `CHUNK_SIZE` or use smaller embedding model
+- Keep type hints on function signatures and service interfaces
+- Raise domain exceptions (`PowergridException` family) where possible
+- Use structured logs with stable keys for observability
+- Keep API contracts in `models.py` and route logic in `routes.py`
 
 ### Frontend
+- Use strict TypeScript types for API payloads and store state
+- Keep page-level logic in `pages/` and reusable shell in `components/`
+- Route all HTTP calls through `frontend/src/lib/api.ts`
+- Prefer store actions for shared async flows over ad hoc page-local duplication
 
-**Issue**: API connection errors
-**Fix**: Check `VITE_API_URL` in `.env` and CORS settings in backend
+## Feature Change Playbook
 
-**Issue**: Large file upload fails
-**Fix**: Check `MAX_UPLOAD_SIZE_MB` in backend config
+### Add a new metadata enum option
+1. Update enum in `backend/app/api/models.py`
+2. Ensure upload/query handling uses the enum in `backend/app/api/routes.py`
+3. Verify option appears automatically via `GET /api/v1/metadata/options`
+4. Confirm frontend forms/filters consume the new option without hardcoded values
 
-## Resources
+### Add a new LLM provider
+1. Implement provider branch in `backend/app/services/llm_service.py`
+2. Add required env variable(s) in `backend/.env.example`
+3. Update README deployment environment table
+4. Validate `/api/v1/query` with both normal and fallback execution
 
-- **LangChain Docs**: https://python.langchain.com/
-- **ChromaDB Docs**: https://docs.trychroma.com/
-- **FastAPI Docs**: https://fastapi.tiangolo.com/
-- **Gemini API**: https://ai.google.dev/
-- **Groq API**: https://console.groq.com/
+## Hosting and Release Runbook
 
-## Contact
+### Backend (Railway)
+- Root directory: `backend`
+- Required env: `GOOGLE_API_KEY`, `FIREBASE_CREDENTIALS`, `FRONTEND_URL`, `DEFAULT_LLM_PROVIDER`, `DEFAULT_LLM_MODEL`, `SECRET_KEY`, `ENVIRONMENT`
+- Recommended env: `BACKEND_API_KEY`, `ENABLE_RATE_LIMITING`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
 
-- Backend Team Lead: [TBD]
-- Frontend Team Lead: [TBD]
-- DevOps Team Lead: [TBD]
-- Project Manager: [TBD]
+### Frontend (Vercel)
+- Root directory: `frontend`
+- Required env: `VITE_API_URL`
+- Recommended env: `VITE_BACKEND_API_KEY` (must match Railway `BACKEND_API_KEY`)
+
+### Release checklist
+- [ ] Railway deployment healthy at `/ping` and `/api/v1/health`
+- [ ] Metadata endpoint returns enums at `/api/v1/metadata/options`
+- [ ] Frontend can upload, query, and delete a document successfully
+- [ ] CORS and API key configuration validated for deployed Vercel URL
+- [ ] README and TEAM docs updated with any contract or env changes
+
+## Common Operational Issues
+
+### 401 Unauthorized on API routes
+- Cause: `BACKEND_API_KEY` configured, but client missing `X-API-Key`
+- Fix: Set `VITE_BACKEND_API_KEY` in Vercel and redeploy frontend
+
+### Query works locally but fails in production
+- Cause: Missing provider key (`GOOGLE_API_KEY` or `GROQ_API_KEY`) or wrong model
+- Fix: Verify Railway env and check backend logs for provider initialization errors
+
+### Upload success but no retrieval hits
+- Cause: metadata mismatch or vector index filters too strict
+- Fix: query without filters first, then re-apply filters incrementally
+
+## References
+
+- FastAPI: https://fastapi.tiangolo.com/
+- LangChain: https://python.langchain.com/
+- ChromaDB: https://docs.trychroma.com/
+- Firebase Firestore: https://firebase.google.com/docs/firestore
+- Railway: https://docs.railway.app/
+- Vercel: https://vercel.com/docs

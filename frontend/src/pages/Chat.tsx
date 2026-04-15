@@ -1,28 +1,60 @@
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useChatStore, type ChatMessage } from '../stores/chatStore'
+import { useKnowledgeStore } from '../stores/knowledgeStore'
 import { formatDuration, formatConfidence } from '../lib/utils'
 
 const Chat = () => {
   const [inputValue, setInputValue] = useState('')
+  const [selectedEquipment, setSelectedEquipment] = useState('')
+  const [selectedVoltage, setSelectedVoltage] = useState('')
+  const [selectedDocTypes, setSelectedDocTypes] = useState<string[]>([])
+  const [useFallback, setUseFallback] = useState(true)
+  const [showFilters, setShowFilters] = useState(false)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const { messages, isLoading, sendMessage, clearChat, hydrateFromBackend } = useChatStore()
 
-  // Hydrate chat history from backend on mount
+  const { messages, isLoading, sendMessage, clearChat, hydrateFromBackend } = useChatStore()
+  const { metadataOptions, isLoadingMetadata, fetchMetadataOptions } = useKnowledgeStore()
+
   useEffect(() => {
     hydrateFromBackend()
-  }, [hydrateFromBackend])
+    fetchMetadataOptions()
+  }, [hydrateFromBackend, fetchMetadataOptions])
 
-  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
 
+  const latestAssistant = useMemo(
+    () => [...messages].reverse().find((m) => m.role === 'assistant' && m.citations && m.citations.length > 0),
+    [messages]
+  )
+
+  const activeFiltersCount =
+    (selectedEquipment ? 1 : 0) +
+    (selectedVoltage ? 1 : 0) +
+    (selectedDocTypes.length > 0 ? 1 : 0) +
+    (useFallback ? 1 : 0)
+
+  const handleDocTypeToggle = (value: string) => {
+    setSelectedDocTypes((prev) =>
+      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]
+    )
+  }
+
   const handleSubmit = async () => {
     const question = inputValue.trim()
     if (!question || isLoading) return
+
     setInputValue('')
-    await sendMessage(question)
+    await sendMessage(question, {
+      equipment_type: selectedEquipment || undefined,
+      voltage_level: selectedVoltage || undefined,
+      doc_types: selectedDocTypes.length > 0 ? selectedDocTypes : undefined,
+      use_fallback: useFallback,
+    })
+
     inputRef.current?.focus()
   }
 
@@ -33,97 +65,251 @@ const Chat = () => {
     }
   }
 
-  const formatTime = (date: Date) => {
-    return new Date(date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-  }
-
-  // Find the latest assistant message's citations for the sidebar
-  const latestAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.citations && m.citations.length > 0)
-
   return (
-    <div className="flex flex-col flex-1 h-[calc(100vh-64px)] relative">
-      <div className="flex flex-1 overflow-hidden">
-        {/* Chat Area */}
-        <div className="flex-1 flex flex-col p-8 overflow-y-auto space-y-8 pb-48">
-          {/* Empty State */}
-          {messages.length === 0 && !isLoading && (
-            <div className="flex-1 flex flex-col items-center justify-center text-center opacity-60">
-              <span className="material-symbols-outlined text-6xl text-primary/30 mb-6">smart_toy</span>
-              <h3 className="text-2xl font-bold text-on-surface/50 mb-2">GridIntel Assistant</h3>
-              <p className="text-on-surface-variant max-w-md">
-                Ask questions about POWERGRID maintenance protocols, CEA guidelines, safety procedures, or equipment specifications.
-              </p>
-              <div className="flex flex-wrap gap-3 mt-8 max-w-lg justify-center">
-                {[
-                  'What is the maintenance interval for a 220 kV circuit breaker?',
-                  'Safety procedures for transformer oil testing?',
-                  'CEA guideline on transmission line inspection',
-                ].map((suggestion) => (
-                  <button
-                    key={suggestion}
-                    onClick={() => { setInputValue(suggestion); inputRef.current?.focus() }}
-                    className="px-4 py-2 bg-surface-container-low text-on-surface-variant text-sm rounded-xl hover:bg-surface-container-high transition-colors text-left"
-                  >
-                    {suggestion}
-                  </button>
-                ))}
+    <div className="flex min-h-[calc(100vh-4rem)] flex-col lg:flex-row">
+      <section className="flex min-h-0 flex-1 flex-col">
+        <div className="border-b border-blue-100 bg-surface-container-low px-4 py-4 md:px-8">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => setShowFilters((prev) => !prev)}
+              className="flex items-center gap-2 rounded-lg bg-surface-container-lowest px-3 py-2 text-sm font-semibold text-primary transition-colors hover:bg-blue-50"
+            >
+              <span className="material-symbols-outlined text-base">tune</span>
+              Retrieval Filters
+              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs">{activeFiltersCount}</span>
+            </button>
+            <button
+              onClick={() => {
+                setSelectedEquipment('')
+                setSelectedVoltage('')
+                setSelectedDocTypes([])
+                setUseFallback(true)
+              }}
+              className="rounded-lg px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high"
+            >
+              Reset Filters
+            </button>
+            <div className="ml-auto text-xs text-on-surface-variant">
+              {isLoadingMetadata ? 'Loading metadata options...' : 'Filters apply to next query'}
+            </div>
+          </div>
+
+          {showFilters && (
+            <div className="mt-4 grid gap-4 rounded-xl border border-blue-100 bg-surface-container-lowest p-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Equipment Type</span>
+                <select
+                  value={selectedEquipment}
+                  onChange={(e) => setSelectedEquipment(e.target.value)}
+                  className="w-full rounded-lg border border-outline-variant bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                >
+                  <option value="">Any equipment</option>
+                  {(metadataOptions?.equipment_types || []).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="space-y-2 text-sm">
+                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Voltage Level</span>
+                <select
+                  value={selectedVoltage}
+                  onChange={(e) => setSelectedVoltage(e.target.value)}
+                  className="w-full rounded-lg border border-outline-variant bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                >
+                  <option value="">Any voltage level</option>
+                  {(metadataOptions?.voltage_levels || []).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="space-y-2 md:col-span-2">
+                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Document Types</span>
+                <div className="flex flex-wrap gap-2">
+                  {(metadataOptions?.document_types || []).map((option) => {
+                    const active = selectedDocTypes.includes(option.value)
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleDocTypeToggle(option.value)}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                          active
+                            ? 'bg-primary text-on-primary'
+                            : 'bg-surface-container-high text-on-surface-variant hover:bg-blue-100'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
+
+              <label className="flex items-center gap-3 md:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={useFallback}
+                  onChange={(e) => setUseFallback(e.target.checked)}
+                  className="h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
+                />
+                <span className="text-sm text-on-surface-variant">
+                  Enable fallback retrieval when strict filters return insufficient context
+                </span>
+              </label>
             </div>
           )}
-
-          {/* Messages */}
-          {messages.map((msg) => (
-            <div key={msg.id}>
-              {msg.role === 'user' ? (
-                <UserBubble message={msg} formatTime={formatTime} />
-              ) : (
-                <AssistantBubble message={msg} formatTime={formatTime} />
-              )}
-            </div>
-          ))}
-
-          {/* Loading indicator */}
-          {isLoading && (
-            <div className="flex flex-col items-start max-w-4xl w-full animate-pulse">
-              <div className="flex items-center gap-3 mb-2 px-1">
-                <div className="w-6 h-6 bg-primary text-white rounded flex items-center justify-center">
-                  <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>smart_toy</span>
-                </div>
-                <span className="text-[10px] font-label text-primary uppercase tracking-widest font-bold">GridIntel Analyzing...</span>
-              </div>
-              <div className="bg-surface-container-lowest p-8 rounded-2xl rounded-tl-none shadow-sm ring-1 ring-blue-100/50 w-full max-w-xl">
-                <div className="flex items-center gap-3">
-                  <div className="flex gap-1">
-                    <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                    <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                    <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                  </div>
-                  <span className="text-sm text-on-surface-variant">Retrieving knowledge and generating response...</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
         </div>
 
-        {/* Context Panel (Sidebar) */}
-        <aside className="w-80 bg-surface-container-low border-l border-blue-100 p-6 flex flex-col gap-6 overflow-y-auto pb-40">
+        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+          <div className="space-y-8 pb-20">
+            {messages.length === 0 && !isLoading && (
+              <div className="flex min-h-[40vh] flex-col items-center justify-center text-center opacity-70">
+                <span className="material-symbols-outlined mb-5 text-6xl text-primary/30">smart_toy</span>
+                <h3 className="mb-2 text-2xl font-bold text-on-surface/60">GridIntel Assistant</h3>
+                <p className="max-w-lg text-on-surface-variant">
+                  Ask safety-critical questions about POWERGRID maintenance protocols, CEA standards, and technical manuals.
+                </p>
+                <div className="mt-7 flex flex-wrap justify-center gap-3">
+                  {[
+                    'What is the maintenance interval for a 220 kV circuit breaker?',
+                    'Safety procedures for transformer oil testing?',
+                    'CEA guideline on transmission line inspection',
+                  ].map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      onClick={() => {
+                        setInputValue(suggestion)
+                        inputRef.current?.focus()
+                      }}
+                      className="rounded-xl bg-surface-container-low px-4 py-2 text-left text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {messages.map((msg) => (
+              <div key={msg.id}>
+                {msg.role === 'user' ? (
+                  <UserBubble message={msg} />
+                ) : (
+                  <AssistantBubble message={msg} />
+                )}
+              </div>
+            ))}
+
+            {isLoading && (
+              <div className="flex max-w-4xl flex-col items-start">
+                <div className="mb-2 flex items-center gap-3 px-1">
+                  <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-white">
+                    <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>
+                      smart_toy
+                    </span>
+                  </div>
+                  <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">
+                    GridIntel Analyzing
+                  </span>
+                </div>
+                <div className="w-full max-w-xl rounded-2xl rounded-tl-none bg-surface-container-lowest p-6 shadow-sm ring-1 ring-blue-100/50">
+                  <div className="flex items-center gap-3">
+                    <div className="flex gap-1">
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '0ms' }}></span>
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '150ms' }}></span>
+                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '300ms' }}></span>
+                    </div>
+                    <span className="text-sm text-on-surface-variant">Retrieving documents and generating a response...</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        <div className="sticky bottom-0 border-t border-blue-100 bg-gradient-to-t from-surface via-surface to-surface/90 px-4 py-4 md:px-8 md:py-6">
+          <div className="mx-auto max-w-5xl">
+            <div className="rounded-2xl bg-surface-container-lowest p-2 shadow-lg ring-2 ring-blue-100 transition-all focus-within:ring-primary">
+              <div className="flex items-center gap-2">
+                <button className="rounded-xl p-3 text-slate-400 transition-colors hover:text-primary" aria-label="Attach file">
+                  <span className="material-symbols-outlined">attach_file</span>
+                </button>
+                <input
+                  ref={inputRef}
+                  className="flex-1 border-none bg-transparent px-2 py-3 text-on-surface placeholder:text-slate-400 focus:ring-0"
+                  placeholder="Ask GridIntel about maintenance, safety, or standards..."
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  disabled={isLoading}
+                />
+                <button
+                  onClick={handleSubmit}
+                  disabled={isLoading || !inputValue.trim()}
+                  className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-on-primary shadow-md transition-all active:scale-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label="Send message"
+                >
+                  <span className="material-symbols-outlined">{isLoading ? 'hourglass_top' : 'send'}</span>
+                </button>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap justify-center gap-4">
+              <button
+                onClick={() => {
+                  setInputValue('Show recent maintenance queries')
+                  inputRef.current?.focus()
+                }}
+                className="flex items-center gap-1 text-[10px] font-label uppercase tracking-widest text-slate-400 transition-colors hover:text-primary"
+              >
+                <span className="material-symbols-outlined text-xs">history</span>
+                Recent queries
+              </button>
+              <button
+                onClick={() => {
+                  setInputValue('List available site manuals')
+                  inputRef.current?.focus()
+                }}
+                className="flex items-center gap-1 text-[10px] font-label uppercase tracking-widest text-slate-400 transition-colors hover:text-primary"
+              >
+                <span className="material-symbols-outlined text-xs">book</span>
+                Site manuals
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside className="w-full border-t border-blue-100 bg-surface-container-low p-5 lg:w-80 lg:border-l lg:border-t-0 lg:p-6">
+        <div className="space-y-6 lg:sticky lg:top-20">
           <div>
-            <h3 className="text-xs font-label font-bold text-slate-500 uppercase tracking-widest mb-4">Referenced Documents</h3>
+            <h3 className="mb-4 font-label text-xs font-bold uppercase tracking-widest text-slate-500">Referenced Documents</h3>
             {latestAssistant?.citations && latestAssistant.citations.length > 0 ? (
               <div className="space-y-3">
-                {latestAssistant.citations.map((citation, i) => (
-                  <div key={i} className={`bg-surface-container-lowest p-4 rounded-xl shadow-sm border-l-4 ${i === 0 ? 'border-primary' : 'border-secondary'}`}>
-                    <div className="flex items-start justify-between">
-                      <span className="material-symbols-outlined text-primary">{i === 0 ? 'menu_book' : 'engineering'}</span>
-                      <span className={`text-[10px] font-label px-2 py-0.5 rounded ${i === 0 ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'}`}>
+                {latestAssistant.citations.map((citation, index) => (
+                  <div
+                    key={`${citation.source}_${citation.chunk_index}_${index}`}
+                    className={`rounded-xl border-l-4 bg-surface-container-lowest p-4 shadow-sm ${
+                      index === 0 ? 'border-primary' : 'border-secondary'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="material-symbols-outlined text-primary">description</span>
+                      <span className="rounded bg-blue-50 px-2 py-0.5 font-label text-[10px] text-blue-600">
                         {citation.doc_type}
                       </span>
                     </div>
-                    <h4 className="text-sm font-bold text-blue-900 mt-2">{citation.source}</h4>
-                    <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{citation.text_preview}</p>
-                    <div className="flex items-center justify-between mt-2">
+                    <h4 className="mt-2 text-sm font-bold text-blue-900">{citation.source}</h4>
+                    <p className="mt-1 line-clamp-2 text-[11px] text-slate-500">{citation.text_preview}</p>
+                    <div className="mt-2 flex items-center justify-between">
                       <span className="text-[10px] font-label text-outline">Score: {formatConfidence(citation.relevance_score)}</span>
                       <span className="text-[10px] font-label text-outline">Page {citation.page}</span>
                     </div>
@@ -131,126 +317,87 @@ const Chat = () => {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-on-surface-variant italic">Ask a question to see referenced documents here.</p>
+              <p className="text-xs italic text-on-surface-variant">Ask a question to view source citations.</p>
             )}
           </div>
+
           <div>
-            <h3 className="text-xs font-label font-bold text-slate-500 uppercase tracking-widest mb-4">Session Info</h3>
-            <div className="p-4 bg-primary text-on-primary rounded-xl">
-              <div className="flex items-center gap-2 mb-2">
+            <h3 className="mb-4 font-label text-xs font-bold uppercase tracking-widest text-slate-500">Session Info</h3>
+            <div className="rounded-xl bg-primary p-4 text-on-primary">
+              <div className="mb-2 flex items-center gap-2">
                 <span className="material-symbols-outlined text-sm">database</span>
-                <span className="text-xs font-label uppercase">Chat Session</span>
+                <span className="font-label text-xs uppercase">Chat Session</span>
               </div>
-              <p className="text-sm font-medium mb-3">{messages.length} messages in this session.</p>
+              <p className="mb-3 text-sm font-medium">{messages.length} messages in this session.</p>
               {latestAssistant?.queryTimeMs && (
-                <p className="text-[10px] mt-2 opacity-80">Last query: {formatDuration(latestAssistant.queryTimeMs)}</p>
+                <p className="text-[10px] opacity-90">Last query time: {formatDuration(latestAssistant.queryTimeMs)}</p>
               )}
               {messages.length > 0 && (
-                <button onClick={clearChat} className="mt-3 w-full bg-on-primary/10 text-on-primary py-1.5 rounded-lg text-xs font-bold hover:bg-on-primary/20 transition-colors">
+                <button
+                  onClick={clearChat}
+                  className="mt-3 w-full rounded-lg bg-on-primary/10 py-1.5 text-xs font-bold text-on-primary transition-colors hover:bg-on-primary/20"
+                >
                   Clear Session
                 </button>
               )}
             </div>
           </div>
-        </aside>
-      </div>
-
-      {/* Input Area */}
-      <div className="absolute bottom-0 left-0 w-[calc(100%-320px)] p-8 bg-gradient-to-t from-surface via-surface/90 to-transparent">
-        <div className="max-w-4xl mx-auto relative group">
-          <div className="absolute inset-0 bg-primary/5 blur-xl rounded-2xl transition-all group-focus-within:bg-primary/10"></div>
-          <div className="relative bg-surface-container-lowest ring-2 ring-blue-100 rounded-2xl shadow-lg p-2 flex items-center transition-all focus-within:ring-primary focus-within:ring-offset-2">
-            <button className="p-3 text-slate-400 hover:text-primary transition-colors">
-              <span className="material-symbols-outlined">attach_file</span>
-            </button>
-            <input
-              ref={inputRef}
-              className="flex-1 bg-transparent border-none focus:ring-0 text-on-surface py-4 px-2 placeholder:text-slate-400"
-              placeholder="Ask GridIntel about maintenance, safety, or manuals..."
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={isLoading}
-            />
-            <div className="flex items-center gap-2 px-2">
-              <button className="p-3 text-slate-400 hover:text-primary transition-colors">
-                <span className="material-symbols-outlined">mic</span>
-              </button>
-              <button
-                onClick={handleSubmit}
-                disabled={isLoading || !inputValue.trim()}
-                className="bg-primary text-on-primary w-12 h-12 flex items-center justify-center rounded-xl transition-all active:scale-90 shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <span className="material-symbols-outlined">{isLoading ? 'hourglass_top' : 'send'}</span>
-              </button>
-            </div>
-          </div>
-          <div className="flex justify-center gap-6 mt-3">
-            <button
-              onClick={() => { setInputValue('Show recent maintenance queries'); inputRef.current?.focus() }}
-              className="text-[10px] font-label text-slate-400 hover:text-primary uppercase tracking-widest flex items-center gap-1"
-            >
-              <span className="material-symbols-outlined text-xs">history</span> Recent queries
-            </button>
-            <button
-              onClick={() => { setInputValue('List available site manuals'); inputRef.current?.focus() }}
-              className="text-[10px] font-label text-slate-400 hover:text-primary uppercase tracking-widest flex items-center gap-1"
-            >
-              <span className="material-symbols-outlined text-xs">book</span> Site manuals
-            </button>
-          </div>
         </div>
-      </div>
+      </aside>
     </div>
   )
 }
 
-// ─── Sub-components ─────────────────────────────────────────────
-
-function UserBubble({ message, formatTime }: { message: ChatMessage; formatTime: (d: Date) => string }) {
+function UserBubble({ message }: { message: ChatMessage }) {
   return (
-    <div className="flex flex-col items-end max-w-3xl ml-auto w-full group">
-      <div className="flex items-center gap-3 mb-2 px-1">
-        <span className="text-[10px] font-label text-slate-400 uppercase tracking-widest">
-          User Request • {formatTime(message.timestamp)}
+    <div className="ml-auto flex w-full max-w-3xl flex-col items-end">
+      <div className="mb-2 flex items-center gap-3 px-1">
+        <span className="font-label text-[10px] uppercase tracking-widest text-slate-400">
+          User Request • {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
-      <div className="bg-surface-container-highest p-6 rounded-2xl rounded-tr-none text-on-surface shadow-sm ring-1 ring-outline-variant/10">
+      <div className="rounded-2xl rounded-tr-none bg-surface-container-highest p-6 text-on-surface shadow-sm ring-1 ring-outline-variant/10">
         <p className="leading-relaxed">{message.content}</p>
       </div>
     </div>
   )
 }
 
-function AssistantBubble({ message, formatTime }: { message: ChatMessage; formatTime: (d: Date) => string }) {
+function AssistantBubble({ message }: { message: ChatMessage }) {
   return (
-    <div className="flex flex-col items-start max-w-4xl w-full">
-      <div className="flex items-center gap-3 mb-2 px-1">
-        <div className="w-6 h-6 bg-primary text-white rounded flex items-center justify-center">
-          <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>smart_toy</span>
+    <div className="flex w-full max-w-4xl flex-col items-start">
+      <div className="mb-2 flex flex-wrap items-center gap-3 px-1">
+        <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-white">
+          <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>
+            smart_toy
+          </span>
         </div>
-        <span className="text-[10px] font-label text-primary uppercase tracking-widest font-bold">
-          GridIntel Analysis • {formatTime(message.timestamp)}
+        <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">
+          GridIntel Analysis • {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
         </span>
         {message.confidence !== undefined && (
-          <span className="text-[10px] font-label text-secondary uppercase">
-            Confidence: {formatConfidence(message.confidence)}
-          </span>
+          <span className="font-label text-[10px] uppercase text-secondary">Confidence: {formatConfidence(message.confidence)}</span>
         )}
       </div>
-      <div className="bg-surface-container-lowest p-8 rounded-2xl rounded-tl-none shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-blue-100/50 space-y-6 w-full">
+
+      <div className="w-full space-y-5 rounded-2xl rounded-tl-none bg-surface-container-lowest p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-blue-100/50">
         <div className="prose prose-sm max-w-none text-on-surface">
-          {message.content.split('\n').map((paragraph, i) => (
-            paragraph.trim() ? <p key={i} className="leading-relaxed mb-2">{paragraph}</p> : null
-          ))}
+          {message.content.split('\n').map((paragraph, index) =>
+            paragraph.trim() ? (
+              <p key={index} className="mb-2 leading-relaxed">
+                {paragraph}
+              </p>
+            ) : null
+          )}
         </div>
 
-        {/* Citations */}
         {message.citations && message.citations.length > 0 && (
-          <div className="pt-6 border-t border-blue-50 flex flex-wrap gap-4">
-            {message.citations.map((citation, i) => (
-              <span key={i} className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-full text-xs font-medium text-primary">
+          <div className="flex flex-wrap gap-3 border-t border-blue-50 pt-4">
+            {message.citations.map((citation, index) => (
+              <span
+                key={`${citation.source}_${citation.chunk_index}_${index}`}
+                className="flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-primary"
+              >
                 <span className="material-symbols-outlined text-sm">description</span>
                 {citation.source} {citation.page && `§${citation.page}`}
               </span>
@@ -258,12 +405,24 @@ function AssistantBubble({ message, formatTime }: { message: ChatMessage; format
           </div>
         )}
 
-        {/* Metadata row */}
         {message.queryTimeMs !== undefined && (
-          <div className="flex gap-4 text-[10px] font-label text-outline uppercase pt-2">
-            <span>⏱ {formatDuration(message.queryTimeMs)}</span>
-            {message.modelUsed && <span>🤖 {message.modelUsed}</span>}
-            {message.documentsRetrieved !== undefined && <span>📄 {message.documentsRetrieved} docs</span>}
+          <div className="flex flex-wrap gap-4 border-t border-blue-50 pt-3 text-[10px] font-label uppercase text-outline">
+            <span className="flex items-center gap-1">
+              <span className="material-symbols-outlined text-sm">schedule</span>
+              {formatDuration(message.queryTimeMs)}
+            </span>
+            {message.modelUsed && (
+              <span className="flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">memory</span>
+                {message.modelUsed}
+              </span>
+            )}
+            {message.documentsRetrieved !== undefined && (
+              <span className="flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">article</span>
+                {message.documentsRetrieved} docs
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { queryDocuments, saveChatMessage, getChatHistory, type QueryResponse, type Citation } from '../lib/api'
+import { queryDocuments, saveChatMessage, getChatHistory, type QueryResponse, type Citation, type QueryRequest } from '../lib/api'
 
 export interface ChatMessage {
   id: string
@@ -21,7 +21,7 @@ interface ChatState {
   isLoading: boolean
   isHydrated: boolean
   error: string | null
-  sendMessage: (question: string) => Promise<void>
+  sendMessage: (question: string, options?: Omit<QueryRequest, 'question'>) => Promise<void>
   clearChat: () => void
   hydrateFromBackend: () => Promise<void>
 }
@@ -72,7 +72,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (question: string) => {
+  sendMessage: async (question: string, options) => {
     const sessionId = get().sessionId
     const userMessage: ChatMessage = {
       id: generateId(),
@@ -95,7 +95,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }).catch(() => {})
 
     try {
-      const response: QueryResponse = await queryDocuments({ question, use_fallback: true })
+      const response: QueryResponse = await queryDocuments({
+        question,
+        use_fallback: options?.use_fallback ?? true,
+        equipment_type: options?.equipment_type,
+        voltage_level: options?.voltage_level,
+        doc_types: options?.doc_types,
+      })
 
       const assistantMessage: ChatMessage = {
         id: generateId(),

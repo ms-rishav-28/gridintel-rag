@@ -1,5 +1,8 @@
 """FastAPI application entry point for POWERGRID RAG system."""
 
+import time
+import uuid
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -79,12 +82,40 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Attach request ID and baseline security headers to every response."""
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
+    response.headers["X-Request-Id"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    logger.info(
+        "request_completed",
+        request_id=request_id,
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+    return response
+
+
 # Exception handlers
 @app.exception_handler(PowergridException)
 async def powergrid_exception_handler(request: Request, exc: PowergridException):
     """Handle custom Powergrid exceptions."""
+    request_id = getattr(request.state, "request_id", None)
     logger.error(
         "powergrid_exception",
+        request_id=request_id,
         error_code=exc.error_code,
         message=exc.message,
         path=request.url.path
@@ -94,7 +125,8 @@ async def powergrid_exception_handler(request: Request, exc: PowergridException)
         content={
             "error_code": exc.error_code,
             "message": exc.message,
-            "details": exc.details
+            "details": exc.details,
+            "request_id": request_id,
         }
     )
 
@@ -102,8 +134,10 @@ async def powergrid_exception_handler(request: Request, exc: PowergridException)
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle general exceptions."""
+    request_id = getattr(request.state, "request_id", None)
     logger.error(
         "unhandled_exception",
+        request_id=request_id,
         error=str(exc),
         type=type(exc).__name__,
         path=request.url.path
@@ -113,7 +147,8 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={
             "error_code": "INTERNAL_ERROR",
             "message": "An unexpected error occurred",
-            "details": {"error_type": type(exc).__name__}
+            "details": {"error_type": type(exc).__name__},
+            "request_id": request_id,
         }
     )
 

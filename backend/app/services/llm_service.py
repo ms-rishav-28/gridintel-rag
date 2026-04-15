@@ -48,45 +48,90 @@ class LLMService:
     """Handles LLM interactions for RAG responses."""
     
     def __init__(self):
-        self.provider = settings.DEFAULT_LLM_PROVIDER
+        self.provider = settings.DEFAULT_LLM_PROVIDER.lower()
         self.model_name = settings.DEFAULT_LLM_MODEL
-        self.llm = self._initialize_llm()
+        self.llm = None
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
             ("human", RAG_PROMPT_TEMPLATE)
         ])
+
+    def _resolve_provider_and_model(self) -> tuple[str, str]:
+        """Resolve provider/model with fallback to an available configured provider."""
+        requested = settings.DEFAULT_LLM_PROVIDER.lower()
+
+        if requested == "gemini" and settings.GOOGLE_API_KEY:
+            return "gemini", settings.DEFAULT_LLM_MODEL
+
+        if requested == "groq" and settings.GROQ_API_KEY:
+            return "groq", settings.DEFAULT_LLM_MODEL
+
+        if settings.GOOGLE_API_KEY:
+            logger.warning(
+                "llm_provider_fallback",
+                requested=requested,
+                selected="gemini",
+                reason="requested_provider_not_configured",
+            )
+            return "gemini", "gemini-1.5-flash"
+
+        if settings.GROQ_API_KEY:
+            logger.warning(
+                "llm_provider_fallback",
+                requested=requested,
+                selected="groq",
+                reason="requested_provider_not_configured",
+            )
+            return "groq", "llama-3.1-70b-versatile"
+
+        raise LLMError(
+            "No LLM provider is configured. Set GOOGLE_API_KEY or GROQ_API_KEY.",
+            provider=requested,
+        )
     
     def _initialize_llm(self):
         """Initialize the LLM based on provider configuration."""
-        if self.provider == "gemini":
+        provider, model_name = self._resolve_provider_and_model()
+
+        if provider == "gemini":
             if not settings.GOOGLE_API_KEY:
                 raise LLMError(
                     "Google API key not configured",
                     provider="gemini"
                 )
+            self.provider = provider
+            self.model_name = model_name
             return ChatGoogleGenerativeAI(
-                model=self.model_name,
+                model=model_name,
                 temperature=settings.RAG_TEMPERATURE,
                 max_output_tokens=settings.RAG_MAX_TOKENS,
                 top_p=settings.RAG_TOP_P,
                 google_api_key=settings.GOOGLE_API_KEY,
             )
         
-        elif self.provider == "groq":
+        elif provider == "groq":
             if not settings.GROQ_API_KEY:
                 raise LLMError(
                     "Groq API key not configured",
                     provider="groq"
                 )
+            self.provider = provider
+            self.model_name = model_name
             return ChatGroq(
-                model_name=self.model_name,
+                model_name=model_name,
                 temperature=settings.RAG_TEMPERATURE,
                 max_tokens=settings.RAG_MAX_TOKENS,
                 api_key=settings.GROQ_API_KEY,
             )
         
         else:
-            raise LLMError(f"Unsupported LLM provider: {self.provider}")
+            raise LLMError(f"Unsupported LLM provider: {provider}")
+
+    def _get_or_initialize_llm(self):
+        """Initialize the provider lazily and cache it for subsequent requests."""
+        if self.llm is None:
+            self.llm = self._initialize_llm()
+        return self.llm
     
     def _format_context(
         self,
@@ -141,9 +186,10 @@ Chunk: {chunk_idx}
             
             # Format context
             context = self._format_context(documents)
+            llm = self._get_or_initialize_llm()
             
             # Create chain
-            chain = self.prompt | self.llm
+            chain = self.prompt | llm
             
             # Generate response
             response = chain.invoke({

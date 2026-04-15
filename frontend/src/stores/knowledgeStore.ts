@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import {
   getHealth, getStats, listDocuments, uploadDocument, deleteDocument,
-  getUserSettings, saveUserSettings,
-  type HealthResponse, type DocumentListItem, type UserSettings,
+  getUserSettings, saveUserSettings, getMetadataOptions, uploadMultipleDocuments,
+  type HealthResponse, type DocumentListItem, type UserSettings, type MetadataOptionsResponse,
 } from '../lib/api'
 
 export type { DocumentListItem as DocumentItem }
@@ -31,13 +31,19 @@ interface KnowledgeState {
   isUploading: boolean
   uploadError: string | null
   userSettings: UserSettings | null
+  metadataOptions: MetadataOptionsResponse | null
+  isLoadingMetadata: boolean
+  isSavingSettings: boolean
+  settingsError: string | null
 
   fetchDocuments: () => Promise<void>
   fetchHealth: () => Promise<void>
   fetchStats: () => Promise<void>
   fetchSettings: () => Promise<void>
-  persistSettings: (settings: UserSettings) => Promise<void>
+  fetchMetadataOptions: () => Promise<void>
+  persistSettings: (settings: UserSettings) => Promise<boolean>
   uploadFile: (file: File, metadata?: { doc_type?: string; equipment_type?: string; voltage_level?: string }) => Promise<boolean>
+  uploadFiles: (files: File[]) => Promise<{ processed: number; failed: number }>
   removeDocument: (docId: string) => Promise<boolean>
 }
 
@@ -50,6 +56,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   isUploading: false,
   uploadError: null,
   userSettings: null,
+  metadataOptions: null,
+  isLoadingMetadata: false,
+  isSavingSettings: false,
+  settingsError: null,
 
   fetchDocuments: async () => {
     set({ isLoadingDocs: true })
@@ -83,18 +93,34 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   fetchSettings: async () => {
     try {
       const settings = await getUserSettings()
-      set({ userSettings: settings })
+      set({ userSettings: settings, settingsError: null })
     } catch {
-      // silently fail — use defaults
+      set({ settingsError: 'Failed to load settings' })
+    }
+  },
+
+  fetchMetadataOptions: async () => {
+    set({ isLoadingMetadata: true })
+    try {
+      const metadataOptions = await getMetadataOptions()
+      set({ metadataOptions, isLoadingMetadata: false })
+    } catch {
+      set({ metadataOptions: null, isLoadingMetadata: false })
     }
   },
 
   persistSettings: async (settings: UserSettings) => {
+    set({ isSavingSettings: true, settingsError: null })
     try {
       await saveUserSettings(settings)
-      set({ userSettings: { ...get().userSettings, ...settings } })
+      set({
+        userSettings: { ...get().userSettings, ...settings },
+        isSavingSettings: false,
+      })
+      return true
     } catch {
-      // silently fail
+      set({ isSavingSettings: false, settingsError: 'Failed to save settings' })
+      return false
     }
   },
 
@@ -110,6 +136,21 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const msg = error?.response?.data?.detail?.message || error?.message || 'Upload failed'
       set({ isUploading: false, uploadError: msg })
       return false
+    }
+  },
+
+  uploadFiles: async (files) => {
+    set({ isUploading: true, uploadError: null })
+    try {
+      const result = await uploadMultipleDocuments(files)
+      set({ isUploading: false })
+      get().fetchDocuments()
+      return { processed: result.processed, failed: result.failed }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: { message?: string } } }; message?: string }
+      const msg = error?.response?.data?.detail?.message || error?.message || 'Batch upload failed'
+      set({ isUploading: false, uploadError: msg })
+      return { processed: 0, failed: files.length }
     }
   },
 

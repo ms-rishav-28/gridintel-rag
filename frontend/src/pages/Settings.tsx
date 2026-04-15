@@ -1,269 +1,449 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import toast from 'react-hot-toast'
 import { useKnowledgeStore } from '../stores/knowledgeStore'
 
 const Settings = () => {
-  const { health, stats, isLoadingHealth, fetchHealth, fetchStats } = useKnowledgeStore()
+  const {
+    health,
+    stats,
+    userSettings,
+    isLoadingHealth,
+    isSavingSettings,
+    settingsError,
+    fetchHealth,
+    fetchStats,
+    fetchSettings,
+    persistSettings,
+  } = useKnowledgeStore()
+
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  const [profile, setProfile] = useState({
+    name: 'Grid Engineer',
+    designation: 'Field Analyst',
+    email: 'engineer@powergrid.local',
+  })
+  const [notifications, setNotifications] = useState({
+    critical: true,
+    insights: true,
+  })
 
   useEffect(() => {
     fetchHealth()
     fetchStats()
-  }, [fetchHealth, fetchStats])
+    fetchSettings()
+  }, [fetchHealth, fetchStats, fetchSettings])
 
-  // Refresh health data periodically
   useEffect(() => {
     const interval = setInterval(() => {
       fetchHealth()
-    }, 30000) // every 30 seconds
+    }, 30000)
     return () => clearInterval(interval)
   }, [fetchHealth])
 
-  const toggleTheme = (mode: 'light' | 'dark') => {
-    setTheme(mode)
-    document.documentElement.classList.toggle('dark', mode === 'dark')
-  }
+  useEffect(() => {
+    if (!userSettings) return
+
+    const nextTheme = userSettings.theme === 'dark' ? 'dark' : 'light'
+    setTheme(nextTheme)
+
+    setProfile((prev) => ({
+      name: userSettings.profile?.name || prev.name,
+      designation: userSettings.profile?.designation || prev.designation,
+      email: userSettings.profile?.email || prev.email,
+    }))
+
+    setNotifications((prev) => ({
+      critical: userSettings.notifications?.critical ?? prev.critical,
+      insights: userSettings.notifications?.insights ?? prev.insights,
+    }))
+  }, [userSettings])
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+  }, [theme])
 
   const isBackendOnline = !!health
   const totalDocs = health?.vector_store?.total_documents ?? 0
 
+  const saveDisabled = useMemo(() => {
+    return isSavingSettings || !profile.name.trim() || !profile.email.trim()
+  }, [isSavingSettings, profile.email, profile.name])
+
+  const handleSave = async () => {
+    const success = await persistSettings({
+      theme,
+      notifications,
+      profile,
+    })
+
+    if (success) {
+      toast.success('Settings saved successfully.')
+    } else {
+      toast.error(settingsError || 'Failed to save settings.')
+    }
+  }
+
+  const handleReset = () => {
+    setTheme('light')
+    setNotifications({ critical: true, insights: true })
+    setProfile({
+      name: userSettings?.profile?.name || 'Grid Engineer',
+      designation: userSettings?.profile?.designation || 'Field Analyst',
+      email: userSettings?.profile?.email || 'engineer@powergrid.local',
+    })
+    document.documentElement.classList.remove('dark')
+  }
+
   return (
     <>
-      <div className="p-8 space-y-8 max-w-6xl w-full mx-auto flex-1">
-        {/* Header */}
-        <div className="flex justify-between items-end mb-12">
+      <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col space-y-8 p-4 md:p-8">
+        <div className="mb-4 flex flex-col gap-4 lg:mb-8 lg:flex-row lg:items-end lg:justify-between">
           <div className="space-y-1">
-            <h2 className="text-4xl font-black text-on-surface tracking-tighter">System Configuration</h2>
-            <p className="text-on-surface-variant font-label text-sm tracking-tight uppercase">Operational Parameters & Personalization</p>
+            <h2 className="text-4xl font-black tracking-tighter text-on-surface">System Configuration</h2>
+            <p className="font-label text-sm uppercase tracking-tight text-on-surface-variant">
+              Operational Parameters and Personalization
+            </p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className={`flex items-center gap-2 px-3 py-1 rounded-sm border ${isBackendOnline ? 'bg-secondary-container border-secondary/20' : 'bg-error-container border-error/20'}`}>
-              <span className={`material-symbols-outlined text-sm ${isBackendOnline ? 'text-on-secondary-container' : 'text-on-error-container'}`} style={{ fontVariationSettings: "'FILL' 1" }}>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div
+              className={`flex items-center gap-2 rounded-sm border px-3 py-1 ${
+                isBackendOnline
+                  ? 'border-secondary/20 bg-secondary-container'
+                  : 'border-error/20 bg-error-container'
+              }`}
+            >
+              <span
+                className={`material-symbols-outlined text-sm ${
+                  isBackendOnline ? 'text-on-secondary-container' : 'text-on-error-container'
+                }`}
+                style={{ fontVariationSettings: "'FILL' 1" }}
+              >
                 {isBackendOnline ? 'check_circle' : 'error'}
               </span>
-              <span className={`font-label text-[10px] font-bold uppercase tracking-widest ${isBackendOnline ? 'text-on-secondary-container' : 'text-on-error-container'}`}>
+              <span
+                className={`font-label text-[10px] font-bold uppercase tracking-widest ${
+                  isBackendOnline ? 'text-on-secondary-container' : 'text-on-error-container'
+                }`}
+              >
                 {isBackendOnline ? 'Backend Connected' : 'Backend Offline'}
               </span>
             </div>
+
             {health?.firebase_connected && (
-              <div className="flex items-center gap-2 px-3 py-1 rounded-sm border bg-orange-50 border-orange-200">
-                <span className="material-symbols-outlined text-sm text-orange-600" style={{ fontVariationSettings: "'FILL' 1" }}>cloud_done</span>
-                <span className="font-label text-[10px] font-bold uppercase tracking-widest text-orange-700">Firebase Active</span>
+              <div className="flex items-center gap-2 rounded-sm border border-orange-200 bg-orange-50 px-3 py-1">
+                <span className="material-symbols-outlined text-sm text-orange-600" style={{ fontVariationSettings: "'FILL' 1" }}>
+                  cloud_done
+                </span>
+                <span className="font-label text-[10px] font-bold uppercase tracking-widest text-orange-700">
+                  Firebase Active
+                </span>
               </div>
             )}
           </div>
         </div>
 
         <div className="grid grid-cols-12 gap-6">
-          {/* Profile Section */}
-          <div className="col-span-12 lg:col-span-8 bg-surface-container-low rounded-xl p-8 flex flex-col md:flex-row gap-8">
-            <div className="relative group">
-              <div className="w-32 h-32 rounded-xl overflow-hidden ring-4 ring-surface-container-lowest">
-                <img alt="Field Engineer Profile" className="w-full h-full object-cover transition-transform group-hover:scale-105" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDU62Y-bbdFM4vhMBUDGRoheXGsugrKPmZVGd_EZ4JM9CUObG0lh2T80hG5rTlEzL6S5_263-8od-WYpA8NWTORo6bPIknrMuh0PyVhD25EQ0htCECjqfn0-fA2m62eIBQvKc-q1cQrxHC_sWsb_u7c0FnrxWUuGgSs-X6FOrL_tS6_x3yVeC-Le9Vj7DE7arsyF0ZGbI4rEgqjI0d1PPKRJm57JdQd7SGhiCmb6TkJVOrgGW3Fast3AWvhGbYJsvXZ1UzljtIJ8d18" />
+          <div className="col-span-12 rounded-xl bg-surface-container-low p-6 lg:col-span-8 lg:p-8">
+            <div className="grid gap-6 md:grid-cols-2">
+              <div className="space-y-1">
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
+                  Field ID Name
+                </label>
+                <input
+                  className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
+                  type="text"
+                  value={profile.name}
+                  onChange={(e) => setProfile((prev) => ({ ...prev, name: e.target.value }))}
+                />
               </div>
-              <button className="absolute -bottom-2 -right-2 bg-primary text-on-primary p-2 rounded-lg shadow-lg hover:bg-primary-container transition-all">
-                <span className="material-symbols-outlined text-sm">edit</span>
-              </button>
-            </div>
-            <div className="flex-1 space-y-6">
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-1">
-                  <label className="font-label text-xs font-bold text-primary uppercase tracking-widest">Field ID Name</label>
-                  <input className="w-full bg-surface-container-lowest border-none border-b-2 border-transparent focus:border-primary focus:ring-0 rounded-lg p-3 font-medium text-on-surface transition-all" type="text" defaultValue="Elena Rodriguez" />
-                </div>
-                <div className="space-y-1">
-                  <label className="font-label text-xs font-bold text-primary uppercase tracking-widest">Designation</label>
-                  <input className="w-full bg-surface-container-lowest border-none border-b-2 border-transparent focus:border-primary focus:ring-0 rounded-lg p-3 font-medium text-on-surface transition-all" type="text" defaultValue="Senior Grid Analyst" />
-                </div>
-                <div className="space-y-1 col-span-2">
-                  <label className="font-label text-xs font-bold text-primary uppercase tracking-widest">Direct Comms (Email)</label>
-                  <input className="w-full bg-surface-container-lowest border-none border-b-2 border-transparent focus:border-primary focus:ring-0 rounded-lg p-3 font-medium text-on-surface transition-all" type="email" defaultValue="e.rodriguez@powergrid.ai" />
-                </div>
+
+              <div className="space-y-1">
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
+                  Designation
+                </label>
+                <input
+                  className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
+                  type="text"
+                  value={profile.designation}
+                  onChange={(e) =>
+                    setProfile((prev) => ({ ...prev, designation: e.target.value }))
+                  }
+                />
+              </div>
+
+              <div className="space-y-1 md:col-span-2">
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
+                  Direct Comms (Email)
+                </label>
+                <input
+                  className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
+                  type="email"
+                  value={profile.email}
+                  onChange={(e) => setProfile((prev) => ({ ...prev, email: e.target.value }))}
+                />
               </div>
             </div>
           </div>
 
-          {/* Appearance Selection */}
-          <div className="col-span-12 lg:col-span-4 bg-surface-container rounded-xl p-8 space-y-6">
-            <h3 className="font-label text-sm font-bold text-on-surface tracking-widest uppercase">Visual Mode</h3>
-            <div className="grid grid-cols-1 gap-3">
-              <button
-                onClick={() => toggleTheme('light')}
-                className={`flex items-center justify-between p-4 rounded-xl transition-all ${theme === 'light' ? 'bg-surface-container-lowest border-2 border-primary text-primary' : 'bg-surface-container-high text-on-surface-variant hover:text-primary'}`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined">light_mode</span>
-                  <span className="font-semibold">Light Industry</span>
-                </div>
-                <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: theme === 'light' ? "'FILL' 1" : "'FILL' 0" }}>
-                  {theme === 'light' ? 'radio_button_checked' : 'radio_button_unchecked'}
-                </span>
-              </button>
-              <button
-                onClick={() => toggleTheme('dark')}
-                className={`flex items-center justify-between p-4 rounded-xl transition-all ${theme === 'dark' ? 'bg-surface-container-lowest border-2 border-primary text-primary' : 'bg-surface-container-high text-on-surface-variant hover:text-primary'}`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined">dark_mode</span>
-                  <span className="font-semibold">Midnight Grid</span>
-                </div>
-                <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: theme === 'dark' ? "'FILL' 1" : "'FILL' 0" }}>
-                  {theme === 'dark' ? 'radio_button_checked' : 'radio_button_unchecked'}
-                </span>
-              </button>
+          <div className="col-span-12 rounded-xl bg-surface-container p-6 lg:col-span-4 lg:p-8">
+            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">Visual Mode</h3>
+            <div className="mt-4 grid gap-3">
+              <ThemeButton
+                icon="light_mode"
+                label="Light Industry"
+                active={theme === 'light'}
+                onClick={() => setTheme('light')}
+              />
+              <ThemeButton
+                icon="dark_mode"
+                label="Midnight Grid"
+                active={theme === 'dark'}
+                onClick={() => setTheme('dark')}
+              />
             </div>
           </div>
 
-          {/* AI System Health Panel — LIVE DATA */}
-          <div className="col-span-12 bg-surface-container-lowest rounded-xl overflow-hidden border border-outline-variant/10">
-            <div className="bg-surface-container-high px-8 py-4 flex justify-between items-center">
+          <div className="col-span-12 overflow-hidden rounded-xl border border-outline-variant/10 bg-surface-container-lowest">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-surface-container-high px-6 py-4 md:px-8">
               <div className="flex items-center gap-3">
                 <span className="material-symbols-outlined text-primary">monitoring</span>
-                <h3 className="font-label text-sm font-black text-on-surface tracking-widest uppercase">Engine Health & Pipeline Integrity</h3>
+                <h3 className="font-label text-sm font-black uppercase tracking-widest text-on-surface">
+                  Engine Health and Pipeline Integrity
+                </h3>
               </div>
+
               <div className="flex items-center gap-4">
                 {isLoadingHealth ? (
-                  <span className="material-symbols-outlined text-sm text-outline animate-spin">progress_activity</span>
+                  <span className="material-symbols-outlined animate-spin text-sm text-outline">progress_activity</span>
                 ) : (
                   <span className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${isBackendOnline ? 'bg-secondary' : 'bg-error'}`}></span>
+                    <span className={`h-2 w-2 rounded-full ${isBackendOnline ? 'bg-secondary' : 'bg-error'}`}></span>
                     <span className="font-label text-[10px] font-bold text-on-surface-variant">
                       {isBackendOnline ? `${totalDocs} chunks indexed` : 'Offline'}
                     </span>
                   </span>
                 )}
-                <button onClick={() => { fetchHealth(); fetchStats() }} className="p-1 text-outline hover:text-primary transition-colors" title="Refresh">
+                <button
+                  onClick={() => {
+                    fetchHealth()
+                    fetchStats()
+                  }}
+                  className="p-1 text-outline transition-colors hover:text-primary"
+                  title="Refresh"
+                >
                   <span className="material-symbols-outlined text-sm">refresh</span>
                 </button>
               </div>
             </div>
-            <div className="p-8 grid grid-cols-1 md:grid-cols-3 gap-8">
-              {/* RAG Pipeline */}
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <span className="font-label text-xs font-bold text-on-surface tracking-wide uppercase">RAG Pipeline</span>
-                  <span className={`text-[10px] font-label font-bold ${isBackendOnline ? 'text-secondary' : 'text-error'}`}>
-                    {isBackendOnline ? 'ONLINE' : 'OFFLINE'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-4 p-4 bg-surface-container rounded-xl">
-                  <span className="material-symbols-outlined text-primary text-3xl">database</span>
-                  <div>
-                    <div className="font-black text-xl text-primary leading-none">{totalDocs}</div>
-                    <div className="font-label text-[10px] text-on-surface-variant uppercase tracking-widest">Total Chunks</div>
-                  </div>
-                </div>
-                <p className="text-xs text-on-surface-variant font-label leading-tight">
-                  {stats ? `Embedding: ${stats.configuration.embedding_model.split('/').pop()}` : 'Loading...'}
-                </p>
-              </div>
 
-              {/* LLM Connection */}
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <span className="font-label text-xs font-bold text-on-surface tracking-wide uppercase">
-                    {health?.llm_model || 'LLM'}
-                  </span>
-                  <span className={`text-[10px] font-label font-bold ${isBackendOnline ? 'text-secondary' : 'text-error'}`}>
-                    {isBackendOnline ? 'CONNECTED' : 'DISCONNECTED'}
-                  </span>
-                </div>
-                <div className="flex items-center gap-4 p-4 bg-surface-container rounded-xl">
-                  <span className="material-symbols-outlined text-primary text-3xl">cloud_done</span>
-                  <div>
-                    <div className="font-black text-xl text-primary leading-none">{health?.llm_provider || '—'}</div>
-                    <div className="font-label text-[10px] text-on-surface-variant uppercase tracking-widest">Provider</div>
-                  </div>
-                </div>
-              </div>
+            <div className="grid gap-8 p-6 md:grid-cols-3 md:p-8">
+              <StatusCard
+                title="RAG Pipeline"
+                status={isBackendOnline ? 'ONLINE' : 'OFFLINE'}
+                icon="database"
+                primaryValue={`${totalDocs}`}
+                primaryLabel="Total Chunks"
+                footer={stats ? `Embedding: ${stats.configuration.embedding_model.split('/').pop()}` : 'Loading...'}
+              />
 
-              {/* Configuration */}
+              <StatusCard
+                title={health?.llm_model || 'LLM'}
+                status={isBackendOnline ? 'CONNECTED' : 'DISCONNECTED'}
+                icon="cloud_done"
+                primaryValue={health?.llm_provider || '—'}
+                primaryLabel="Provider"
+                footer={health?.vector_store?.status === 'ready' ? 'Vector store ready' : 'Vector store degraded'}
+              />
+
               <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <span className="font-label text-xs font-bold text-on-surface tracking-wide uppercase">Chunking Config</span>
-                  <span className="text-[10px] font-label text-secondary font-bold">{stats ? 'ACTIVE' : '—'}</span>
+                <div className="flex items-center justify-between">
+                  <span className="font-label text-xs font-bold uppercase tracking-wide text-on-surface">
+                    Chunking Config
+                  </span>
+                  <span className="font-label text-[10px] font-bold text-secondary">
+                    {stats ? 'ACTIVE' : '—'}
+                  </span>
                 </div>
-                <div className="p-4 bg-surface-container rounded-xl space-y-3">
-                  <div className="flex justify-between text-[10px] font-bold font-label uppercase">
-                    <span>Chunk size</span>
-                    <span>{stats?.configuration.chunk_size ?? '—'}</span>
-                  </div>
-                  <div className="flex justify-between text-[10px] font-bold font-label uppercase">
-                    <span>Overlap</span>
-                    <span>{stats?.configuration.chunk_overlap ?? '—'}</span>
-                  </div>
-                  <div className="flex justify-between text-[10px] font-bold font-label uppercase">
-                    <span>Collection</span>
-                    <span>{health?.vector_store?.collection_name ?? '—'}</span>
-                  </div>
+                <div className="space-y-3 rounded-xl bg-surface-container p-4">
+                  <MetricRow label="Chunk size" value={stats?.configuration.chunk_size ?? '—'} />
+                  <MetricRow label="Overlap" value={stats?.configuration.chunk_overlap ?? '—'} />
+                  <MetricRow label="Collection" value={health?.vector_store?.collection_name ?? '—'} />
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Notifications */}
-          <div className="col-span-12 lg:col-span-6 bg-surface-container-low rounded-xl p-8 space-y-6">
-            <h3 className="font-label text-sm font-bold text-on-surface tracking-widest uppercase">Notification Protocols</h3>
-            <div className="space-y-4">
-              <ToggleRow icon="warning" title="Critical Grid Failures" subtitle="Immediate mobile push & email" defaultChecked />
-              <ToggleRow icon="insights" title="AI Optimization Insights" subtitle="Weekly summarized report" defaultChecked />
+          <div className="col-span-12 rounded-xl bg-surface-container-low p-8 lg:col-span-6">
+            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">
+              Notification Protocols
+            </h3>
+            <div className="mt-6 space-y-4">
+              <ToggleRow
+                icon="warning"
+                title="Critical Grid Failures"
+                subtitle="Immediate mobile push and email"
+                checked={notifications.critical}
+                onChange={(checked) =>
+                  setNotifications((prev) => ({ ...prev, critical: checked }))
+                }
+              />
+              <ToggleRow
+                icon="insights"
+                title="AI Optimization Insights"
+                subtitle="Weekly summarized report"
+                checked={notifications.insights}
+                onChange={(checked) =>
+                  setNotifications((prev) => ({ ...prev, insights: checked }))
+                }
+              />
             </div>
           </div>
 
-          {/* Security & Logs */}
-          <div className="col-span-12 lg:col-span-6 bg-surface-container rounded-xl p-8 space-y-6">
-            <h3 className="font-label text-sm font-bold text-on-surface tracking-widest uppercase">Security & Verification</h3>
-            <div className="space-y-4">
-              <button className="w-full flex items-center justify-between p-4 bg-surface-container-lowest rounded-xl hover:bg-white transition-colors group">
-                <div className="flex items-center gap-4">
-                  <span className="material-symbols-outlined text-primary">key</span>
-                  <div className="text-left">
-                    <div className="font-bold text-on-surface">Change Access Credentials</div>
-                    <div className="text-xs text-on-surface-variant">Last updated 14 days ago</div>
-                  </div>
-                </div>
-                <span className="material-symbols-outlined text-on-surface-variant group-hover:translate-x-1 transition-transform">chevron_right</span>
-              </button>
-              <button className="w-full flex items-center justify-between p-4 bg-surface-container-lowest rounded-xl hover:bg-white transition-colors group">
-                <div className="flex items-center gap-4">
-                  <span className="material-symbols-outlined text-primary">history</span>
-                  <div className="text-left">
-                    <div className="font-bold text-on-surface">Analysis Audit Log</div>
-                    <div className="text-xs text-on-surface-variant">View all historical AI interactions</div>
-                  </div>
-                </div>
-                <span className="material-symbols-outlined text-on-surface-variant group-hover:translate-x-1 transition-transform">chevron_right</span>
-              </button>
+          <div className="col-span-12 rounded-xl bg-surface-container p-8 lg:col-span-6">
+            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">
+              Security and Verification
+            </h3>
+            <div className="mt-6 space-y-4">
+              <ActionCard
+                icon="key"
+                title="Access Credentials"
+                subtitle="API key and role policy are managed by deployment env vars"
+              />
+              <ActionCard
+                icon="history"
+                title="Analysis Audit Log"
+                subtitle="All persisted chat sessions are available in Firestore"
+              />
             </div>
           </div>
         </div>
 
-        {/* Global Actions */}
-        <div className="flex justify-end gap-4 pt-12">
-          <button className="px-8 py-3 text-primary font-bold hover:bg-blue-100/50 rounded-xl transition-all">
+        {settingsError && (
+          <div className="rounded-lg border border-error/30 bg-error-container px-4 py-3 text-sm text-on-error-container">
+            {settingsError}
+          </div>
+        )}
+
+        <div className="flex flex-wrap justify-end gap-4 pt-4">
+          <button
+            onClick={handleReset}
+            className="rounded-xl px-8 py-3 font-bold text-primary transition-all hover:bg-blue-100/50"
+          >
             Revert to Default
           </button>
-          <button className="px-10 py-3 bg-primary text-on-primary font-bold rounded-xl shadow-lg shadow-primary/20 hover:bg-primary-container transition-all flex items-center gap-2">
-            <span className="material-symbols-outlined text-sm">save</span>
-            Deploy Changes
+          <button
+            onClick={handleSave}
+            disabled={saveDisabled}
+            className="flex items-center gap-2 rounded-xl bg-primary px-10 py-3 font-bold text-on-primary shadow-lg shadow-primary/20 transition-all hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-sm">
+              {isSavingSettings ? 'hourglass_top' : 'save'}
+            </span>
+            {isSavingSettings ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>
 
-      {/* Footer */}
       <footer className="mt-auto p-8 text-center text-on-surface-variant opacity-50">
-        <p className="font-label text-[10px] uppercase tracking-[0.3em]">Authorized Access Only • POWERGRID Industrial Intelligence • Proprietary System</p>
+        <p className="font-label text-[10px] uppercase tracking-[0.3em]">
+          Authorized Access Only • POWERGRID Industrial Intelligence • Proprietary System
+        </p>
       </footer>
     </>
   )
 }
 
-// ─── Toggle Row Sub-component ─────────────────────────────────
-
-function ToggleRow({ icon, title, subtitle, defaultChecked = false }: { icon: string; title: string; subtitle: string; defaultChecked?: boolean }) {
-  const [checked, setChecked] = useState(defaultChecked)
-
+function ThemeButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: string
+  label: string
+  active: boolean
+  onClick: () => void
+}) {
   return (
-    <div className="flex items-center justify-between p-4 bg-surface-container-lowest rounded-xl">
+    <button
+      onClick={onClick}
+      className={`flex items-center justify-between rounded-xl p-4 transition-all ${
+        active
+          ? 'border-2 border-primary bg-surface-container-lowest text-primary'
+          : 'bg-surface-container-high text-on-surface-variant hover:text-primary'
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        <span className="material-symbols-outlined">{icon}</span>
+        <span className="font-semibold">{label}</span>
+      </div>
+      <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: active ? "'FILL' 1" : "'FILL' 0" }}>
+        {active ? 'radio_button_checked' : 'radio_button_unchecked'}
+      </span>
+    </button>
+  )
+}
+
+function StatusCard({
+  title,
+  status,
+  icon,
+  primaryValue,
+  primaryLabel,
+  footer,
+}: {
+  title: string
+  status: string
+  icon: string
+  primaryValue: string
+  primaryLabel: string
+  footer: string
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="font-label text-xs font-bold uppercase tracking-wide text-on-surface">{title}</span>
+        <span className="font-label text-[10px] font-bold text-secondary">{status}</span>
+      </div>
+      <div className="flex items-center gap-4 rounded-xl bg-surface-container p-4">
+        <span className="material-symbols-outlined text-3xl text-primary">{icon}</span>
+        <div>
+          <div className="text-xl font-black leading-none text-primary">{primaryValue}</div>
+          <div className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">
+            {primaryLabel}
+          </div>
+        </div>
+      </div>
+      <p className="font-label text-xs leading-tight text-on-surface-variant">{footer}</p>
+    </div>
+  )
+}
+
+function MetricRow({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="flex items-center justify-between font-label text-[10px] font-bold uppercase">
+      <span>{label}</span>
+      <span>{value}</span>
+    </div>
+  )
+}
+
+function ToggleRow({
+  icon,
+  title,
+  subtitle,
+  checked,
+  onChange,
+}: {
+  icon: string
+  title: string
+  subtitle: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-xl bg-surface-container-lowest p-4">
       <div className="flex items-center gap-4">
         <span className="material-symbols-outlined text-primary">{icon}</span>
         <div>
@@ -272,12 +452,33 @@ function ToggleRow({ icon, title, subtitle, defaultChecked = false }: { icon: st
         </div>
       </div>
       <button
-        onClick={() => setChecked(!checked)}
-        className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-surface-container-highest'}`}
+        onClick={() => onChange(!checked)}
+        className={`relative h-6 w-11 rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-surface-container-highest'}`}
       >
-        <span className={`absolute top-[2px] left-[2px] w-5 h-5 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+        <span
+          className={`absolute left-[2px] top-[2px] h-5 w-5 rounded-full bg-white shadow transition-transform ${
+            checked ? 'translate-x-5' : 'translate-x-0'
+          }`}
+        />
       </button>
     </div>
+  )
+}
+
+function ActionCard({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {
+  return (
+    <button className="group flex w-full items-center justify-between rounded-xl bg-surface-container-lowest p-4 transition-colors hover:bg-white">
+      <div className="flex items-center gap-4">
+        <span className="material-symbols-outlined text-primary">{icon}</span>
+        <div className="text-left">
+          <div className="font-bold text-on-surface">{title}</div>
+          <div className="text-xs text-on-surface-variant">{subtitle}</div>
+        </div>
+      </div>
+      <span className="material-symbols-outlined text-on-surface-variant transition-transform group-hover:translate-x-1">
+        chevron_right
+      </span>
+    </button>
   )
 }
 

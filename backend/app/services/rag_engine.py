@@ -40,21 +40,28 @@ class RAGEngine:
         doc_types: Optional[List[str]] = None
     ) -> Optional[Dict[str, Any]]:
         """Build metadata filters for vector search."""
-        filters = {}
-        
+        clauses: List[Dict[str, Any]] = []
+
         if equipment_type:
-            filters['equipment_type'] = equipment_type.upper()
-        
+            clauses.append({'equipment_type': equipment_type.upper()})
+
         if voltage_level:
-            filters['voltage_level'] = voltage_level
-        
+            clauses.append({'voltage_level': voltage_level})
+
         if doc_types:
             if len(doc_types) == 1:
-                filters['doc_type'] = doc_types[0]
+                clauses.append({'doc_type': doc_types[0]})
             else:
-                filters['doc_type'] = {'$in': doc_types}
-        
-        return filters if filters else None
+                clauses.append({'doc_type': {'$in': doc_types}})
+
+        if not clauses:
+            return None
+
+        if len(clauses) == 1:
+            return clauses[0]
+
+        # Chroma where-filter expects a single top-level operator when combining conditions.
+        return {'$and': clauses}
     
     @log_execution_time(logger, "rag_query")
     async def query(

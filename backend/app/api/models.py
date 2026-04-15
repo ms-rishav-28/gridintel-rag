@@ -154,3 +154,16 @@ class UserSettingsRequest(BaseModel):
     theme: Optional[str] = Field(None, description="'light' or 'dark'")
     notifications: Optional[Dict[str, bool]] = Field(None, description="Notification preferences")
     profile: Optional[Dict[str, str]] = Field(None, description="User profile fields")
+
+
+class MetadataOption(BaseModel):
+    """Reusable key/label model for enum-driven frontend filters."""
+    value: str
+    label: str
+
+
+class MetadataOptionsResponse(BaseModel):
+    """Available metadata options for filtering and upload forms."""
+    equipment_types: List[MetadataOption]
+    voltage_levels: List[MetadataOption]
+    document_types: List[MetadataOption]

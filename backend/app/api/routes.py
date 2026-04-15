@@ -10,16 +10,20 @@ from app.api.models import (
     DocumentBatchUploadResponse, HealthResponse, ErrorResponse,
     EquipmentType, VoltageLevel, DocumentType,
     ChatMessageRequest, ChatSessionResponse,
-    UserSettingsRequest
+    UserSettingsRequest, MetadataOptionsResponse, MetadataOption
 )
 from app.core.config import get_settings
 from app.core.exceptions import PowergridException, RAGQueryError, DocumentProcessingError
 from app.core.logging import get_logger
+from app.core.security import enforce_api_key, enforce_rate_limit
 
 logger = get_logger(__name__)
 settings = get_settings()
 
-router = APIRouter(prefix=settings.API_V1_PREFIX)
+router = APIRouter(
+    prefix=settings.API_V1_PREFIX,
+    dependencies=[Depends(enforce_api_key), Depends(enforce_rate_limit)],
+)
 
 
 # ─── Lazy service accessors (never crash at import time) ─────────
@@ -366,6 +370,25 @@ async def save_settings_route(request: UserSettingsRequest):
     except Exception as e:
         logger.error("settings_save_error", error=str(e))
         raise HTTPException(status_code=500, detail={"message": str(e)})
+
+
+@router.get("/metadata/options", response_model=MetadataOptionsResponse)
+async def metadata_options():
+    """Return enum-backed options for frontend filter and upload controls."""
+    return MetadataOptionsResponse(
+        equipment_types=[
+            MetadataOption(value=enum_item.value, label=enum_item.value.replace("_", " ").title())
+            for enum_item in EquipmentType
+        ],
+        voltage_levels=[
+            MetadataOption(value=enum_item.value, label=enum_item.value)
+            for enum_item in VoltageLevel
+        ],
+        document_types=[
+            MetadataOption(value=enum_item.value, label=enum_item.value.replace("_", " ").title())
+            for enum_item in DocumentType
+        ],
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
