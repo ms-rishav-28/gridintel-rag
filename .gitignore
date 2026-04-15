@@ -1,0 +1,9 @@
+# Root-level gitignore
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Stitch exports (reference only, not needed in production)
+stitch_ui_exports/
