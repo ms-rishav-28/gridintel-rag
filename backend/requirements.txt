@@ -30,6 +30,10 @@ pillow==10.2.0
 sentence-transformers==2.6.1
 huggingface-hub>=0.34.0,<1.0.0
 
+# Keep deployment lean on Railway by avoiding CUDA package downloads.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+
 # Utilities
 python-dotenv==1.0.1
 httpx==0.26.0
