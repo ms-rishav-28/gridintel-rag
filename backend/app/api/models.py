@@ -116,7 +116,7 @@ class HealthResponse(BaseModel):
     vector_store: Dict[str, Any] = Field(..., description="Vector store statistics")
     llm_provider: str = Field(..., description="Active LLM provider")
     llm_model: str = Field(..., description="Active LLM model")
-    firebase_connected: bool = Field(False, description="Whether Firebase is connected")
+    convex_connected: bool = Field(False, description="Whether Convex is connected")
 
 
 class ErrorResponse(BaseModel):

@@ -4,27 +4,27 @@
 ![React](https://img.shields.io/badge/React-Frontend-61DAFB?logo=react&logoColor=0B1F2A)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?logo=typescript&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-UI-06B6D4?logo=tailwindcss&logoColor=white)
-![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?logo=firebase&logoColor=black)
+![Convex](https://img.shields.io/badge/Convex-Realtime_DB-F9FAFB?logo=convex&logoColor=111827)
 ![Railway](https://img.shields.io/badge/Railway-Backend_Hosting-0B0D0E?logo=railway&logoColor=white)
 ![Vercel](https://img.shields.io/badge/Vercel-Frontend_Hosting-000000?logo=vercel&logoColor=white)
 ![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-F97316)
 
 > **Production-grade RAG system** for POWERGRID operations knowledge management.  
-> Frontend → **Vercel** | Backend → **Railway** | Database → **Firebase Firestore**
+> Frontend → **Vercel** | Backend → **Railway** | Realtime DB → **Convex**
 
 ---
 
 ## Architecture Overview
 
 ```
-┌──────────────┐     HTTPS      ┌──────────────────┐     Firestore     ┌───────────┐
-│   Vercel     │ ──────────────→│     Railway      │ ─────────────────→│  Firebase  │
-│  (React SPA) │                │  (FastAPI + ML)  │                   │ (Firestore)│
-│              │                │                  │                   │            │
-│  Vite Build  │                │  ChromaDB (RAM)  │                   │  Documents │
-│  Tailwind    │                │  Sentence-BERT   │                   │  Chat Logs │
-│  Zustand     │                │  LangChain       │                   │  Settings  │
-└──────────────┘                └──────────────────┘                   └───────────┘
+┌──────────────┐   HTTPS + Convex   ┌──────────────────┐   Server SDK    ┌─────────────┐
+│   Vercel     │ ─────────────────→ │     Railway      │ ───────────────→ │   Convex    │
+│  (React SPA) │                    │  (FastAPI + ML)  │                  │  Realtime   │
+│              │                    │                  │                  │     DB      │
+│  Vite Build  │                    │  ChromaDB (RAM)  │                  │  Documents  │
+│  Tailwind    │                    │  Sentence-BERT   │                  │ Chat Logs   │
+│  Convex React│                    │  LangChain       │                  │  Settings   │
+└──────────────┘                    └──────────────────┘                  └─────────────┘
 ```
 
 ## Current Validation Snapshot
@@ -39,46 +39,38 @@
 
 - **Node.js** ≥ 18
 - **Python** ≥ 3.10
-- **Firebase Project** (Firestore enabled)
+- **Convex Project**
 - **Google Gemini API Key** (or Groq)
 - **Railway Account** (free tier works, Starter recommended)
 - **Vercel Account** (free tier)
 
 ---
 
-## 1. Firebase Setup
+## 1. Convex Setup
 
-### Create Firebase Project
-1. Go to [Firebase Console](https://console.firebase.google.com/)
-2. Create a new project (e.g., `powergrid-smartops`)
-3. Enable **Cloud Firestore** (start in Production mode)
+### Create Convex Project
+1. Go to [Convex Dashboard](https://dashboard.convex.dev/)
+2. Create a new project (for example `powergrid-smartops`)
+3. In `frontend`, authenticate and link your project:
 
-### Generate Service Account Key
-1. Go to **Project Settings → Service Accounts**
-2. Click **Generate New Private Key**
-3. Download the JSON file
-4. You'll paste this JSON as a single-line string into Railway's environment
-
-### Firestore Security Rules (Production)
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    // Documents collection
-    match /documents/{docId} {
-      allow read, write: if true; // Lock down with auth later
-    }
-    // Chat sessions
-    match /chat_sessions/{sessionId} {
-      allow read, write: if true;
-    }
-    // System config
-    match /system_config/{configId} {
-      allow read, write: if true;
-    }
-  }
-}
+```bash
+cd frontend
+npx convex dev
 ```
+
+### Deploy Convex Functions
+From `frontend`, deploy the Convex schema and functions in `frontend/convex`:
+
+```bash
+npx convex deploy
+```
+
+### Collect Convex Connection Values
+- `VITE_CONVEX_URL`: your Convex deployment URL (for frontend)
+- `CONVEX_URL`: same deployment URL for backend server integration
+- `CONVEX_ADMIN_KEY`: optional admin token if you want server-to-server privileged access
+
+If `CONVEX_URL` is not set in backend, persistence falls back to in-memory storage.
 
 ---
 
@@ -96,11 +88,12 @@ Set these in **Variables** tab:
 | Variable | Value | Required |
 |---|---|---|
 | `GOOGLE_API_KEY` | Your Gemini API key | ✅ |
-| `FIREBASE_CREDENTIALS` | Full JSON of service account (single line) | ✅ |
+| `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | ✅ |
 | `FRONTEND_URL` | `https://your-app.vercel.app` | ✅ |
 | `DEFAULT_LLM_PROVIDER` | `gemini` | ✅ |
 | `DEFAULT_LLM_MODEL` | `gemini-1.5-flash` | ✅ |
 | `SECRET_KEY` | Random 64-char string | ✅ |
+| `CONVEX_ADMIN_KEY` | Convex admin key (optional, recommended for server mutations) | ❌ |
 | `BACKEND_API_KEY` | Strong random API key for frontend-backend auth | Recommended |
 | `ENABLE_RATE_LIMITING` | `true` | Recommended |
 | `RATE_LIMIT_REQUESTS` | `100` | Recommended |
@@ -110,11 +103,6 @@ Set these in **Variables** tab:
 | `LOG_LEVEL` | `INFO` | ❌ |
 
 If `BACKEND_API_KEY` is configured, all non-exempt API routes require the `X-API-Key` request header.
-
-> **Tip**: To paste Firebase credentials as a single line, run:
-> ```bash
-> cat firebase-service-account.json | jq -c .
-> ```
 
 ### Verify Deployment
 ```bash
@@ -140,6 +128,7 @@ curl https://your-railway-url.up.railway.app/api/v1/health
 | Variable | Value |
 |---|---|
 | `VITE_API_URL` | `https://your-railway-url.up.railway.app/api/v1` |
+| `VITE_CONVEX_URL` | `https://your-project.convex.cloud` |
 | `VITE_BACKEND_API_KEY` | Same value as Railway `BACKEND_API_KEY` |
 
 ### Verify
@@ -197,7 +186,7 @@ powergrid-rag/
 │   │   │   └── logging.py         # Structured logging
 │   │   ├── services/
 │   │   │   ├── document_processor.py  # PDF/DOCX → chunks
-│   │   │   ├── firebase_service.py    # Firestore persistence layer
+│   │   │   ├── convex_service.py      # Convex persistence layer
 │   │   │   ├── llm_service.py         # Gemini/Groq integration
 │   │   │   ├── rag_engine.py          # RAG orchestrator
 │   │   │   └── vector_store.py        # ChromaDB vector index
@@ -208,12 +197,19 @@ powergrid-rag/
 │   └── .env.example               # Environment template
 │
 ├── frontend/
+│   ├── convex/
+│   │   ├── schema.ts              # Convex data model
+│   │   ├── chat.ts                # Chat/session queries + mutations
+│   │   ├── documents.ts           # Document metadata queries + mutations
+│   │   └── settings.ts            # Settings queries + mutations
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── ErrorBoundary.tsx   # Global crash recovery UI
 │   │   │   └── Layout.tsx          # SideNav + TopBar shell
 │   │   ├── lib/
 │   │   │   ├── api.ts              # Axios API client + types
+│   │   │   ├── convexApi.ts        # Typed Convex function references
+│   │   │   ├── convexClient.ts     # Convex client bootstrap
 │   │   │   └── utils.ts            # Formatting helpers
 │   │   ├── pages/
 │   │   │   ├── Chat.tsx            # RAG chat interface
@@ -259,6 +255,40 @@ When `BACKEND_API_KEY` is set, include `X-API-Key: <your-key>` in client request
 
 ---
 
+## Deployment Checklist Commands
+
+### Local Preflight (before push)
+```bash
+# 1) Backend syntax and dependency sanity
+.\.venv\Scripts\python.exe -m compileall backend\app
+
+# 2) Frontend typecheck + production build
+cd frontend
+npm run build
+cd ..
+
+# 3) Convex functions/schema deploy from frontend
+cd frontend
+npx convex deploy
+cd ..
+```
+
+### Production Post-Deploy Verification
+```bash
+# Backend health and ping
+curl https://YOUR-BACKEND/ping
+curl https://YOUR-BACKEND/api/v1/health
+
+# Metadata and documents
+curl https://YOUR-BACKEND/api/v1/metadata/options
+curl https://YOUR-BACKEND/api/v1/documents/list
+
+# Optional: with API key if BACKEND_API_KEY is enabled
+curl -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/health
+```
+
+---
+
 ## Troubleshooting
 
 ### "Network Error" on frontend
@@ -266,8 +296,8 @@ When `BACKEND_API_KEY` is set, include `X-API-Key: <your-key>` in client request
 - Check `VITE_API_URL` matches your Railway URL
 - Verify CORS: backend `FRONTEND_URL` must match your Vercel domain
 
-### "Firebase not configured" warning in backend logs
-- Set `FIREBASE_CREDENTIALS` env var with the full JSON string
+### "Convex not configured" warning in backend logs
+- Set `CONVEX_URL` (and optionally `CONVEX_ADMIN_KEY`) in Railway env vars
 - Without it, the app runs in memory-only mode (data lost on restart)
 
 ### Cold start takes 30+ seconds

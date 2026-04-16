@@ -3,7 +3,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-UI-61DAFB?logo=react&logoColor=0B1F2A)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?logo=typescript&logoColor=white)
-![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?logo=firebase&logoColor=black)
+![Convex](https://img.shields.io/badge/Convex-Realtime_DB-F9FAFB?logo=convex&logoColor=111827)
 ![Railway](https://img.shields.io/badge/Railway-Backend_Hosting-0B0D0E?logo=railway&logoColor=white)
 ![Vercel](https://img.shields.io/badge/Vercel-Frontend_Hosting-000000?logo=vercel&logoColor=white)
 
@@ -22,6 +22,7 @@ Key files:
 - `backend/app/services/rag_engine.py` - Query pipeline and retrieval flow
 - `backend/app/services/vector_store.py` - ChromaDB indexing, filtering, deletion
 - `backend/app/services/document_processor.py` - File parsing and chunk generation
+- `backend/app/services/convex_service.py` - Convex persistence integration
 - `backend/app/core/security.py` - API key and in-memory rate limiter
 
 ### Frontend Team
@@ -37,14 +38,15 @@ Key files:
 - `frontend/src/pages/KnowledgeBase.tsx` - Upload, list, and delete documents
 - `frontend/src/pages/Settings.tsx` - Service health and user/system settings
 - `frontend/src/lib/api.ts` - Typed API client and request headers
-- `frontend/src/stores/chatStore.ts` - Chat/session state and persistence
-- `frontend/src/stores/knowledgeStore.ts` - Docs, stats, settings state
+- `frontend/src/lib/convexClient.ts` - Convex client provider bootstrap
+- `frontend/src/lib/convexApi.ts` - Typed Convex function references
+- `frontend/convex/` - Convex schema, queries, and mutations
 
 ### Platform and DevOps Team
 Focus areas:
 - Railway backend runtime health
 - Vercel frontend deployment and environment management
-- Firebase Firestore credentials and retention controls
+- Convex deployment, schema rollout, and key management
 - Build reliability, logs, and smoke validation
 
 Key files:
@@ -137,12 +139,12 @@ If `BACKEND_API_KEY` is set, include `X-API-Key` in requests to protected API ro
 
 ### Backend (Railway)
 - Root directory: `backend`
-- Required env: `GOOGLE_API_KEY`, `FIREBASE_CREDENTIALS`, `FRONTEND_URL`, `DEFAULT_LLM_PROVIDER`, `DEFAULT_LLM_MODEL`, `SECRET_KEY`, `ENVIRONMENT`
-- Recommended env: `BACKEND_API_KEY`, `ENABLE_RATE_LIMITING`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
+- Required env: `GOOGLE_API_KEY`, `CONVEX_URL`, `FRONTEND_URL`, `DEFAULT_LLM_PROVIDER`, `DEFAULT_LLM_MODEL`, `SECRET_KEY`, `ENVIRONMENT`
+- Recommended env: `CONVEX_ADMIN_KEY`, `BACKEND_API_KEY`, `ENABLE_RATE_LIMITING`, `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW`
 
 ### Frontend (Vercel)
 - Root directory: `frontend`
-- Required env: `VITE_API_URL`
+- Required env: `VITE_API_URL`, `VITE_CONVEX_URL`
 - Recommended env: `VITE_BACKEND_API_KEY` (must match Railway `BACKEND_API_KEY`)
 
 ### Release checklist
@@ -171,6 +173,6 @@ If `BACKEND_API_KEY` is set, include `X-API-Key` in requests to protected API ro
 - FastAPI: https://fastapi.tiangolo.com/
 - LangChain: https://python.langchain.com/
 - ChromaDB: https://docs.trychroma.com/
-- Firebase Firestore: https://firebase.google.com/docs/firestore
+- Convex: https://docs.convex.dev/
 - Railway: https://docs.railway.app/
 - Vercel: https://vercel.com/docs

@@ -19,3 +19,7 @@ Thumbs.db
 
 # Vercel
 .vercel
+
+# Convex
+.convex/
+convex/_generated/

@@ -1,26 +1,89 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useChatStore, type ChatMessage } from '../stores/chatStore'
-import { useKnowledgeStore } from '../stores/knowledgeStore'
-import { formatDuration, formatConfidence } from '../lib/utils'
+import { useMutation, useQuery } from 'convex/react'
+import {
+  getMetadataOptions,
+  queryDocuments,
+  type Citation,
+  type MetadataOptionsResponse,
+} from '../lib/api'
+import { convexApi, type ConvexChatMessage } from '../lib/convexApi'
+import { formatConfidence, formatDuration } from '../lib/utils'
+
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: Date
+  citations?: Citation[]
+  confidence?: number
+  modelUsed?: string
+  queryTimeMs?: number
+  documentsRetrieved?: number
+}
+
+const SESSION_KEY = 'powergrid_session_id'
+
+function getOrCreateSessionId() {
+  const existing = sessionStorage.getItem(SESSION_KEY)
+  if (existing) return existing
+
+  const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  sessionStorage.setItem(SESSION_KEY, sessionId)
+  return sessionId
+}
+
+function createNewSessionId() {
+  const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  sessionStorage.setItem(SESSION_KEY, sessionId)
+  return sessionId
+}
 
 const Chat = () => {
+  const [sessionId, setSessionId] = useState(() => getOrCreateSessionId())
   const [inputValue, setInputValue] = useState('')
   const [selectedEquipment, setSelectedEquipment] = useState('')
   const [selectedVoltage, setSelectedVoltage] = useState('')
   const [selectedDocTypes, setSelectedDocTypes] = useState<string[]>([])
   const [useFallback, setUseFallback] = useState(true)
   const [showFilters, setShowFilters] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const [metadataOptions, setMetadataOptions] = useState<MetadataOptionsResponse | null>(null)
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const { messages, isLoading, sendMessage, clearChat, hydrateFromBackend } = useChatStore()
-  const { metadataOptions, isLoadingMetadata, fetchMetadataOptions } = useKnowledgeStore()
+  const saveMessage = useMutation(convexApi.chat.saveMessage)
+  const session = useQuery(convexApi.chat.getSession, { session_id: sessionId })
+
+  const messages: ChatMessage[] = useMemo(() => {
+    const source = session?.messages ?? []
+    return source.map((message: ConvexChatMessage, index) => ({
+      id: `${message.timestamp || 'ts'}_${index}`,
+      role: message.role,
+      content: message.content,
+      timestamp: new Date(message.timestamp || Date.now()),
+      citations: (message.citations as Citation[] | undefined) ?? [],
+      confidence: message.confidence,
+      modelUsed: message.model_used,
+      queryTimeMs: message.query_time_ms,
+    }))
+  }, [session?.messages])
 
   useEffect(() => {
-    hydrateFromBackend()
-    fetchMetadataOptions()
-  }, [hydrateFromBackend, fetchMetadataOptions])
+    const loadMetadata = async () => {
+      try {
+        setIsLoadingMetadata(true)
+        const options = await getMetadataOptions()
+        setMetadataOptions(options)
+      } catch {
+        setMetadataOptions(null)
+      } finally {
+        setIsLoadingMetadata(false)
+      }
+    }
+    loadMetadata()
+  }, [])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -28,7 +91,7 @@ const Chat = () => {
 
   const latestAssistant = useMemo(
     () => [...messages].reverse().find((m) => m.role === 'assistant' && m.citations && m.citations.length > 0),
-    [messages]
+    [messages],
   )
 
   const activeFiltersCount =
@@ -39,7 +102,7 @@ const Chat = () => {
 
   const handleDocTypeToggle = (value: string) => {
     setSelectedDocTypes((prev) =>
-      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]
+      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value],
     )
   }
 
@@ -47,22 +110,59 @@ const Chat = () => {
     const question = inputValue.trim()
     if (!question || isLoading) return
 
+    const timestamp = new Date().toISOString()
     setInputValue('')
-    await sendMessage(question, {
-      equipment_type: selectedEquipment || undefined,
-      voltage_level: selectedVoltage || undefined,
-      doc_types: selectedDocTypes.length > 0 ? selectedDocTypes : undefined,
-      use_fallback: useFallback,
+    setIsLoading(true)
+
+    await saveMessage({
+      session_id: sessionId,
+      role: 'user',
+      content: question,
+      timestamp,
     })
 
-    inputRef.current?.focus()
+    try {
+      const response = await queryDocuments({
+        question,
+        equipment_type: selectedEquipment || undefined,
+        voltage_level: selectedVoltage || undefined,
+        doc_types: selectedDocTypes.length > 0 ? selectedDocTypes : undefined,
+        use_fallback: useFallback,
+      })
+
+      await saveMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        content: response.answer,
+        timestamp: new Date().toISOString(),
+        citations: response.citations,
+        confidence: response.confidence,
+        model_used: response.model_used,
+        query_time_ms: response.query_time_ms,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to get response from backend.'
+      await saveMessage({
+        session_id: sessionId,
+        role: 'assistant',
+        content: `⚠️ Error: ${message}`,
+        timestamp: new Date().toISOString(),
+      })
+    } finally {
+      setIsLoading(false)
+      inputRef.current?.focus()
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSubmit()
+      void handleSubmit()
     }
+  }
+
+  const handleClearSession = () => {
+    setSessionId(createNewSessionId())
   }
 
   return (
@@ -179,7 +279,7 @@ const Chat = () => {
                   {[
                     'What is the maintenance interval for a 220 kV circuit breaker?',
                     'Safety procedures for transformer oil testing?',
-                    'CEA guideline on transmission line inspection',
+                    'CEA guideline on transmission line inspection?',
                   ].map((suggestion) => (
                     <button
                       key={suggestion}
@@ -197,13 +297,7 @@ const Chat = () => {
             )}
 
             {messages.map((msg) => (
-              <div key={msg.id}>
-                {msg.role === 'user' ? (
-                  <UserBubble message={msg} />
-                ) : (
-                  <AssistantBubble message={msg} />
-                )}
-              </div>
+              <div key={msg.id}>{msg.role === 'user' ? <UserBubble message={msg} /> : <AssistantBubble message={msg} />}</div>
             ))}
 
             {isLoading && (
@@ -214,9 +308,7 @@ const Chat = () => {
                       smart_toy
                     </span>
                   </div>
-                  <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">
-                    GridIntel Analyzing
-                  </span>
+                  <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">GridIntel Analyzing</span>
                 </div>
                 <div className="w-full max-w-xl rounded-2xl rounded-tl-none bg-surface-container-lowest p-6 shadow-sm ring-1 ring-blue-100/50">
                   <div className="flex items-center gap-3">
@@ -253,7 +345,7 @@ const Chat = () => {
                   disabled={isLoading}
                 />
                 <button
-                  onClick={handleSubmit}
+                  onClick={() => void handleSubmit()}
                   disabled={isLoading || !inputValue.trim()}
                   className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-on-primary shadow-md transition-all active:scale-90 disabled:cursor-not-allowed disabled:opacity-50"
                   aria-label="Send message"
@@ -334,7 +426,7 @@ const Chat = () => {
               )}
               {messages.length > 0 && (
                 <button
-                  onClick={clearChat}
+                  onClick={handleClearSession}
                   className="mt-3 w-full rounded-lg bg-on-primary/10 py-1.5 text-xs font-bold text-on-primary transition-colors hover:bg-on-primary/20"
                 >
                   Clear Session
@@ -387,7 +479,7 @@ function AssistantBubble({ message }: { message: ChatMessage }) {
               <p key={index} className="mb-2 leading-relaxed">
                 {paragraph}
               </p>
-            ) : null
+            ) : null,
           )}
         </div>
 

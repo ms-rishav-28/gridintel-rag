@@ -76,8 +76,9 @@ class Settings(BaseSettings):
     BACKEND_API_KEY: Optional[str] = None
     API_KEY_HEADER: str = "X-API-Key"
 
-    # Firebase (JSON string of service account credentials)
-    FIREBASE_CREDENTIALS: Optional[str] = None
+    # Convex
+    CONVEX_URL: Optional[str] = None
+    CONVEX_ADMIN_KEY: Optional[str] = None
 
     # Railway / Render
     RAILWAY_STATIC_URL: Optional[str] = None

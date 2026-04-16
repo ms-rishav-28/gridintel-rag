@@ -1,20 +1,33 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery } from 'convex/react'
 import toast from 'react-hot-toast'
-import { useKnowledgeStore } from '../stores/knowledgeStore'
+import { getHealth, getStats, type HealthResponse } from '../lib/api'
+import { convexApi } from '../lib/convexApi'
+
+interface StatsData {
+  vector_store: {
+    total_documents: number
+    collection_name: string
+    embedding_model: string
+  }
+  configuration: {
+    chunk_size: number
+    chunk_overlap: number
+    embedding_model: string
+    llm_provider: string
+    llm_model: string
+  }
+}
 
 const Settings = () => {
-  const {
-    health,
-    stats,
-    userSettings,
-    isLoadingHealth,
-    isSavingSettings,
-    settingsError,
-    fetchHealth,
-    fetchStats,
-    fetchSettings,
-    persistSettings,
-  } = useKnowledgeStore()
+  const settingsData = useQuery(convexApi.settings.getSettings, {})
+  const saveSettings = useMutation(convexApi.settings.upsertSettings)
+
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [stats, setStats] = useState<StatsData | null>(null)
+  const [isLoadingHealth, setIsLoadingHealth] = useState(false)
+  const [isSavingSettings, setIsSavingSettings] = useState(false)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
 
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [profile, setProfile] = useState({
@@ -27,36 +40,47 @@ const Settings = () => {
     insights: true,
   })
 
+  const refreshHealth = async () => {
+    try {
+      setIsLoadingHealth(true)
+      const [nextHealth, nextStats] = await Promise.all([getHealth(), getStats()])
+      setHealth(nextHealth)
+      setStats(nextStats)
+    } catch {
+      setHealth(null)
+    } finally {
+      setIsLoadingHealth(false)
+    }
+  }
+
   useEffect(() => {
-    fetchHealth()
-    fetchStats()
-    fetchSettings()
-  }, [fetchHealth, fetchStats, fetchSettings])
+    void refreshHealth()
+  }, [])
 
   useEffect(() => {
     const interval = setInterval(() => {
-      fetchHealth()
+      void refreshHealth()
     }, 30000)
     return () => clearInterval(interval)
-  }, [fetchHealth])
+  }, [])
 
   useEffect(() => {
-    if (!userSettings) return
+    if (!settingsData) return
 
-    const nextTheme = userSettings.theme === 'dark' ? 'dark' : 'light'
+    const nextTheme = settingsData.theme === 'dark' ? 'dark' : 'light'
     setTheme(nextTheme)
 
     setProfile((prev) => ({
-      name: userSettings.profile?.name || prev.name,
-      designation: userSettings.profile?.designation || prev.designation,
-      email: userSettings.profile?.email || prev.email,
+      name: settingsData.profile?.name || prev.name,
+      designation: settingsData.profile?.designation || prev.designation,
+      email: settingsData.profile?.email || prev.email,
     }))
 
     setNotifications((prev) => ({
-      critical: userSettings.notifications?.critical ?? prev.critical,
-      insights: userSettings.notifications?.insights ?? prev.insights,
+      critical: settingsData.notifications?.critical ?? prev.critical,
+      insights: settingsData.notifications?.insights ?? prev.insights,
     }))
-  }, [userSettings])
+  }, [settingsData])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
@@ -70,16 +94,21 @@ const Settings = () => {
   }, [isSavingSettings, profile.email, profile.name])
 
   const handleSave = async () => {
-    const success = await persistSettings({
-      theme,
-      notifications,
-      profile,
-    })
-
-    if (success) {
+    try {
+      setIsSavingSettings(true)
+      setSettingsError(null)
+      await saveSettings({
+        theme,
+        notifications,
+        profile,
+      })
       toast.success('Settings saved successfully.')
-    } else {
-      toast.error(settingsError || 'Failed to save settings.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save settings.'
+      setSettingsError(message)
+      toast.error(message)
+    } finally {
+      setIsSavingSettings(false)
     }
   }
 
@@ -87,9 +116,9 @@ const Settings = () => {
     setTheme('light')
     setNotifications({ critical: true, insights: true })
     setProfile({
-      name: userSettings?.profile?.name || 'Grid Engineer',
-      designation: userSettings?.profile?.designation || 'Field Analyst',
-      email: userSettings?.profile?.email || 'engineer@powergrid.local',
+      name: settingsData?.profile?.name || 'Grid Engineer',
+      designation: settingsData?.profile?.designation || 'Field Analyst',
+      email: settingsData?.profile?.email || 'engineer@powergrid.local',
     })
     document.documentElement.classList.remove('dark')
   }
@@ -108,9 +137,7 @@ const Settings = () => {
           <div className="flex flex-wrap items-center gap-3">
             <div
               className={`flex items-center gap-2 rounded-sm border px-3 py-1 ${
-                isBackendOnline
-                  ? 'border-secondary/20 bg-secondary-container'
-                  : 'border-error/20 bg-error-container'
+                isBackendOnline ? 'border-secondary/20 bg-secondary-container' : 'border-error/20 bg-error-container'
               }`}
             >
               <span
@@ -130,13 +157,13 @@ const Settings = () => {
               </span>
             </div>
 
-            {health?.firebase_connected && (
-              <div className="flex items-center gap-2 rounded-sm border border-orange-200 bg-orange-50 px-3 py-1">
-                <span className="material-symbols-outlined text-sm text-orange-600" style={{ fontVariationSettings: "'FILL' 1" }}>
+            {health?.convex_connected && (
+              <div className="flex items-center gap-2 rounded-sm border border-primary/20 bg-primary-container px-3 py-1">
+                <span className="material-symbols-outlined text-sm text-on-primary-container" style={{ fontVariationSettings: "'FILL' 1" }}>
                   cloud_done
                 </span>
-                <span className="font-label text-[10px] font-bold uppercase tracking-widest text-orange-700">
-                  Firebase Active
+                <span className="font-label text-[10px] font-bold uppercase tracking-widest text-on-primary-container">
+                  Convex Active
                 </span>
               </div>
             )}
@@ -147,9 +174,7 @@ const Settings = () => {
           <div className="col-span-12 rounded-xl bg-surface-container-low p-6 lg:col-span-8 lg:p-8">
             <div className="grid gap-6 md:grid-cols-2">
               <div className="space-y-1">
-                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
-                  Field ID Name
-                </label>
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">Field ID Name</label>
                 <input
                   className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
                   type="text"
@@ -159,23 +184,17 @@ const Settings = () => {
               </div>
 
               <div className="space-y-1">
-                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
-                  Designation
-                </label>
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">Designation</label>
                 <input
                   className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
                   type="text"
                   value={profile.designation}
-                  onChange={(e) =>
-                    setProfile((prev) => ({ ...prev, designation: e.target.value }))
-                  }
+                  onChange={(e) => setProfile((prev) => ({ ...prev, designation: e.target.value }))}
                 />
               </div>
 
               <div className="space-y-1 md:col-span-2">
-                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">
-                  Direct Comms (Email)
-                </label>
+                <label className="font-label text-xs font-bold uppercase tracking-widest text-primary">Direct Comms (Email)</label>
                 <input
                   className="w-full rounded-lg border-none bg-surface-container-lowest p-3 font-medium text-on-surface transition-all focus:border-primary focus:ring-0"
                   type="email"
@@ -189,18 +208,8 @@ const Settings = () => {
           <div className="col-span-12 rounded-xl bg-surface-container p-6 lg:col-span-4 lg:p-8">
             <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">Visual Mode</h3>
             <div className="mt-4 grid gap-3">
-              <ThemeButton
-                icon="light_mode"
-                label="Light Industry"
-                active={theme === 'light'}
-                onClick={() => setTheme('light')}
-              />
-              <ThemeButton
-                icon="dark_mode"
-                label="Midnight Grid"
-                active={theme === 'dark'}
-                onClick={() => setTheme('dark')}
-              />
+              <ThemeButton icon="light_mode" label="Light Industry" active={theme === 'light'} onClick={() => setTheme('light')} />
+              <ThemeButton icon="dark_mode" label="Midnight Grid" active={theme === 'dark'} onClick={() => setTheme('dark')} />
             </div>
           </div>
 
@@ -208,9 +217,7 @@ const Settings = () => {
             <div className="flex flex-wrap items-center justify-between gap-3 bg-surface-container-high px-6 py-4 md:px-8">
               <div className="flex items-center gap-3">
                 <span className="material-symbols-outlined text-primary">monitoring</span>
-                <h3 className="font-label text-sm font-black uppercase tracking-widest text-on-surface">
-                  Engine Health and Pipeline Integrity
-                </h3>
+                <h3 className="font-label text-sm font-black uppercase tracking-widest text-on-surface">Engine Health and Pipeline Integrity</h3>
               </div>
 
               <div className="flex items-center gap-4">
@@ -224,14 +231,7 @@ const Settings = () => {
                     </span>
                   </span>
                 )}
-                <button
-                  onClick={() => {
-                    fetchHealth()
-                    fetchStats()
-                  }}
-                  className="p-1 text-outline transition-colors hover:text-primary"
-                  title="Refresh"
-                >
+                <button onClick={() => void refreshHealth()} className="p-1 text-outline transition-colors hover:text-primary" title="Refresh">
                   <span className="material-symbols-outlined text-sm">refresh</span>
                 </button>
               </div>
@@ -251,59 +251,47 @@ const Settings = () => {
                 title={health?.llm_model || 'LLM'}
                 status={isBackendOnline ? 'CONNECTED' : 'DISCONNECTED'}
                 icon="cloud_done"
-                primaryValue={health?.llm_provider || '—'}
+                primaryValue={health?.llm_provider || '-'}
                 primaryLabel="Provider"
                 footer={health?.vector_store?.status === 'ready' ? 'Vector store ready' : 'Vector store degraded'}
               />
 
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
-                  <span className="font-label text-xs font-bold uppercase tracking-wide text-on-surface">
-                    Chunking Config
-                  </span>
-                  <span className="font-label text-[10px] font-bold text-secondary">
-                    {stats ? 'ACTIVE' : '—'}
-                  </span>
+                  <span className="font-label text-xs font-bold uppercase tracking-wide text-on-surface">Chunking Config</span>
+                  <span className="font-label text-[10px] font-bold text-secondary">{stats ? 'ACTIVE' : '-'}</span>
                 </div>
                 <div className="space-y-3 rounded-xl bg-surface-container p-4">
-                  <MetricRow label="Chunk size" value={stats?.configuration.chunk_size ?? '—'} />
-                  <MetricRow label="Overlap" value={stats?.configuration.chunk_overlap ?? '—'} />
-                  <MetricRow label="Collection" value={health?.vector_store?.collection_name ?? '—'} />
+                  <MetricRow label="Chunk size" value={stats?.configuration.chunk_size ?? '-'} />
+                  <MetricRow label="Overlap" value={stats?.configuration.chunk_overlap ?? '-'} />
+                  <MetricRow label="Collection" value={health?.vector_store?.collection_name ?? '-'} />
                 </div>
               </div>
             </div>
           </div>
 
           <div className="col-span-12 rounded-xl bg-surface-container-low p-8 lg:col-span-6">
-            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">
-              Notification Protocols
-            </h3>
+            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">Notification Protocols</h3>
             <div className="mt-6 space-y-4">
               <ToggleRow
                 icon="warning"
                 title="Critical Grid Failures"
                 subtitle="Immediate mobile push and email"
                 checked={notifications.critical}
-                onChange={(checked) =>
-                  setNotifications((prev) => ({ ...prev, critical: checked }))
-                }
+                onChange={(checked) => setNotifications((prev) => ({ ...prev, critical: checked }))}
               />
               <ToggleRow
                 icon="insights"
                 title="AI Optimization Insights"
                 subtitle="Weekly summarized report"
                 checked={notifications.insights}
-                onChange={(checked) =>
-                  setNotifications((prev) => ({ ...prev, insights: checked }))
-                }
+                onChange={(checked) => setNotifications((prev) => ({ ...prev, insights: checked }))}
               />
             </div>
           </div>
 
           <div className="col-span-12 rounded-xl bg-surface-container p-8 lg:col-span-6">
-            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">
-              Security and Verification
-            </h3>
+            <h3 className="font-label text-sm font-bold uppercase tracking-widest text-on-surface">Security and Verification</h3>
             <div className="mt-6 space-y-4">
               <ActionCard
                 icon="key"
@@ -313,42 +301,33 @@ const Settings = () => {
               <ActionCard
                 icon="history"
                 title="Analysis Audit Log"
-                subtitle="All persisted chat sessions are available in Firestore"
+                subtitle="All persisted chat sessions are available in Convex"
               />
             </div>
           </div>
         </div>
 
         {settingsError && (
-          <div className="rounded-lg border border-error/30 bg-error-container px-4 py-3 text-sm text-on-error-container">
-            {settingsError}
-          </div>
+          <div className="rounded-lg border border-error/30 bg-error-container px-4 py-3 text-sm text-on-error-container">{settingsError}</div>
         )}
 
         <div className="flex flex-wrap justify-end gap-4 pt-4">
-          <button
-            onClick={handleReset}
-            className="rounded-xl px-8 py-3 font-bold text-primary transition-all hover:bg-blue-100/50"
-          >
+          <button onClick={handleReset} className="rounded-xl px-8 py-3 font-bold text-primary transition-all hover:bg-blue-100/50">
             Revert to Default
           </button>
           <button
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             disabled={saveDisabled}
             className="flex items-center gap-2 rounded-xl bg-primary px-10 py-3 font-bold text-on-primary shadow-lg shadow-primary/20 transition-all hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span className="material-symbols-outlined text-sm">
-              {isSavingSettings ? 'hourglass_top' : 'save'}
-            </span>
+            <span className="material-symbols-outlined text-sm">{isSavingSettings ? 'hourglass_top' : 'save'}</span>
             {isSavingSettings ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>
 
       <footer className="mt-auto p-8 text-center text-on-surface-variant opacity-50">
-        <p className="font-label text-[10px] uppercase tracking-[0.3em]">
-          Authorized Access Only • POWERGRID Industrial Intelligence • Proprietary System
-        </p>
+        <p className="font-label text-[10px] uppercase tracking-[0.3em]">Authorized Access Only - POWERGRID Industrial Intelligence - Proprietary System</p>
       </footer>
     </>
   )
@@ -369,9 +348,7 @@ function ThemeButton({
     <button
       onClick={onClick}
       className={`flex items-center justify-between rounded-xl p-4 transition-all ${
-        active
-          ? 'border-2 border-primary bg-surface-container-lowest text-primary'
-          : 'bg-surface-container-high text-on-surface-variant hover:text-primary'
+        active ? 'border-2 border-primary bg-surface-container-lowest text-primary' : 'bg-surface-container-high text-on-surface-variant hover:text-primary'
       }`}
     >
       <div className="flex items-center gap-3">
@@ -410,9 +387,7 @@ function StatusCard({
         <span className="material-symbols-outlined text-3xl text-primary">{icon}</span>
         <div>
           <div className="text-xl font-black leading-none text-primary">{primaryValue}</div>
-          <div className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">
-            {primaryLabel}
-          </div>
+          <div className="font-label text-[10px] uppercase tracking-widest text-on-surface-variant">{primaryLabel}</div>
         </div>
       </div>
       <p className="font-label text-xs leading-tight text-on-surface-variant">{footer}</p>
@@ -475,9 +450,7 @@ function ActionCard({ icon, title, subtitle }: { icon: string; title: string; su
           <div className="text-xs text-on-surface-variant">{subtitle}</div>
         </div>
       </div>
-      <span className="material-symbols-outlined text-on-surface-variant transition-transform group-hover:translate-x-1">
-        chevron_right
-      </span>
+      <span className="material-symbols-outlined text-on-surface-variant transition-transform group-hover:translate-x-1">chevron_right</span>
     </button>
   )
 }

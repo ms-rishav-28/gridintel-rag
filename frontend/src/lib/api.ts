@@ -93,7 +93,7 @@ export interface HealthResponse {
   }
   llm_provider: string
   llm_model: string
-  firebase_connected: boolean
+  convex_connected: boolean
 }
 
 export interface DocumentListItem {

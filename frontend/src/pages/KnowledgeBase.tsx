@@ -1,21 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useKnowledgeStore, type DocumentItem } from '../stores/knowledgeStore'
+import { useMutation, useQuery } from 'convex/react'
 import toast from 'react-hot-toast'
+import {
+  getMetadataOptions,
+  uploadDocument,
+  uploadMultipleDocuments,
+  type MetadataOptionsResponse,
+} from '../lib/api'
+import { convexApi, type ConvexDocument } from '../lib/convexApi'
 
 const KnowledgeBase = () => {
-  const {
-    documents,
-    isLoadingDocs,
-    isUploading,
-    uploadError,
-    metadataOptions,
-    isLoadingMetadata,
-    fetchDocuments,
-    fetchMetadataOptions,
-    uploadFile,
-    uploadFiles,
-    removeDocument,
-  } = useKnowledgeStore()
+  const documents = useQuery(convexApi.documents.listActive, {}) ?? []
+  const deleteDocument = useMutation(convexApi.documents.softDeleteDocument)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [activeFilter, setActiveFilter] = useState<string>('ALL')
@@ -23,22 +19,31 @@ const KnowledgeBase = () => {
   const [uploadDocType, setUploadDocType] = useState('')
   const [uploadEquipmentType, setUploadEquipmentType] = useState('')
   const [uploadVoltageLevel, setUploadVoltageLevel] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
+  const [metadataOptions, setMetadataOptions] = useState<MetadataOptionsResponse | null>(null)
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
 
   useEffect(() => {
-    fetchDocuments()
-    fetchMetadataOptions()
-  }, [fetchDocuments, fetchMetadataOptions])
+    const loadMetadata = async () => {
+      try {
+        setIsLoadingMetadata(true)
+        const options = await getMetadataOptions()
+        setMetadataOptions(options)
+      } catch {
+        setMetadataOptions(null)
+      } finally {
+        setIsLoadingMetadata(false)
+      }
+    }
+    void loadMetadata()
+  }, [])
 
-  const totalChunks = useMemo(
-    () => documents.reduce((sum, doc) => sum + doc.chunks_count, 0),
-    [documents]
-  )
+  const totalChunks = useMemo(() => documents.reduce((sum, doc) => sum + doc.chunks_count, 0), [documents])
 
   const filteredDocs = useMemo(() => {
     return documents.filter((doc) => {
       const matchesFilter = activeFilter === 'ALL' || doc.doc_type === activeFilter
-      const matchesSearch =
-        !searchQuery || doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
+      const matchesSearch = !searchQuery || doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
       return matchesFilter && matchesSearch
     })
   }, [documents, activeFilter, searchQuery])
@@ -47,42 +52,41 @@ const KnowledgeBase = () => {
     const selectedFiles = Array.from(e.target.files || [])
     if (selectedFiles.length === 0) return
 
-    if (selectedFiles.length === 1) {
-      const file = selectedFiles[0]
-      const success = await uploadFile(file, {
-        doc_type: uploadDocType || undefined,
-        equipment_type: uploadEquipmentType || undefined,
-        voltage_level: uploadVoltageLevel || undefined,
-      })
+    try {
+      setIsUploading(true)
 
-      if (success) {
+      if (selectedFiles.length === 1) {
+        const file = selectedFiles[0]
+        await uploadDocument(file, {
+          doc_type: uploadDocType || undefined,
+          equipment_type: uploadEquipmentType || undefined,
+          voltage_level: uploadVoltageLevel || undefined,
+        })
         toast.success(`"${file.name}" uploaded and ingested successfully.`)
       } else {
-        toast.error(uploadError || 'Upload failed')
-      }
-    } else {
-      if (uploadDocType || uploadEquipmentType || uploadVoltageLevel) {
-        toast('Metadata fields are applied only for single-file upload. Batch upload will auto-detect metadata.')
-      }
+        if (uploadDocType || uploadEquipmentType || uploadVoltageLevel) {
+          toast('Metadata fields are applied only for single-file upload. Batch upload will auto-detect metadata.')
+        }
 
-      const result = await uploadFiles(selectedFiles)
-      if (result.processed > 0) {
+        const result = await uploadMultipleDocuments(selectedFiles)
         toast.success(`Batch upload complete: ${result.processed} processed, ${result.failed} failed.`)
-      } else {
-        toast.error(uploadError || 'Batch upload failed')
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Upload failed'
+      toast.error(message)
+    } finally {
+      setIsUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
     }
-
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const handleDelete = async (doc: DocumentItem) => {
+  const handleDelete = async (doc: ConvexDocument) => {
     if (!window.confirm(`Remove "${doc.filename}" from the knowledge base?`)) return
 
-    const success = await removeDocument(doc.doc_id)
-    if (success) {
+    try {
+      await deleteDocument({ doc_id: doc.doc_id })
       toast.success(`"${doc.filename}" removed.`)
-    } else {
+    } catch {
       toast.error('Failed to remove document.')
     }
   }
@@ -116,9 +120,7 @@ const KnowledgeBase = () => {
           <div className="mt-2 flex items-center gap-2">
             <span className={`h-2 w-2 rounded-full ${documents.length > 0 ? 'bg-secondary' : 'bg-outline'}`}></span>
             <p className="font-label text-sm uppercase tracking-widest text-on-surface-variant">
-              {isLoadingDocs
-                ? 'Loading documentation state...'
-                : `${documents.length} active docs · ${totalChunks} indexed chunks`}
+              {`${documents.length} active docs · ${totalChunks} indexed chunks`}
             </p>
           </div>
         </div>
@@ -129,13 +131,11 @@ const KnowledgeBase = () => {
             disabled={isUploading}
             className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold text-on-primary transition-all hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span className="material-symbols-outlined text-sm">
-              {isUploading ? 'hourglass_top' : 'upload_file'}
-            </span>
+            <span className="material-symbols-outlined text-sm">{isUploading ? 'hourglass_top' : 'upload_file'}</span>
             {isUploading ? 'Ingesting...' : 'Upload Documents'}
           </button>
           <span className="rounded-sm bg-secondary-container px-3 py-1 font-label text-xs font-bold text-on-secondary-container">
-            V2.4 LATEST
+            Convex Live
           </span>
         </div>
       </section>
@@ -213,9 +213,7 @@ const KnowledgeBase = () => {
         ))}
 
         <div className="relative ml-auto min-w-[220px] flex-1 md:max-w-sm md:flex-none">
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-            search
-          </span>
+          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">search</span>
           <input
             className="h-9 w-full rounded-lg bg-surface-container-lowest pl-9 pr-4 text-sm focus:ring-2 focus:ring-primary"
             placeholder="Search documents..."
@@ -245,12 +243,7 @@ const KnowledgeBase = () => {
         </div>
 
         <div className="space-y-4 md:col-span-8">
-          {isLoadingDocs ? (
-            <div className="flex flex-col items-center justify-center rounded-xl bg-surface-container-lowest p-12">
-              <span className="material-symbols-outlined mb-4 animate-spin text-4xl text-primary/30">progress_activity</span>
-              <p className="text-sm text-on-surface-variant">Loading documents...</p>
-            </div>
-          ) : filteredDocs.length === 0 ? (
+          {filteredDocs.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl bg-surface-container-lowest p-12 text-center">
               <span className="material-symbols-outlined mb-4 text-5xl text-primary/20">folder_open</span>
               <h4 className="mb-2 text-lg font-bold text-on-surface/60">
@@ -263,9 +256,7 @@ const KnowledgeBase = () => {
               </p>
             </div>
           ) : (
-            filteredDocs.map((doc) => (
-              <DocumentCard key={doc.doc_id} doc={doc} onDelete={handleDelete} />
-            ))
+            filteredDocs.map((doc) => <DocumentCard key={doc.doc_id} doc={doc} onDelete={handleDelete} />)
           )}
         </div>
 
@@ -274,24 +265,18 @@ const KnowledgeBase = () => {
             <div className="flex-1">
               <h4 className="font-headline text-xl font-bold">Semantic Discovery</h4>
               <p className="mt-2 text-sm text-on-surface-variant">
-                Retrieval graph processing links CEA standards, technical manuals, and circular updates to reduce missed references in high-stakes responses.
+                Convex-backed metadata streams keep your document state live while Python handles ingestion and vector indexing.
               </p>
               <div className="mt-5 flex flex-wrap gap-3">
-                <button className="rounded-lg bg-primary px-6 py-2 text-sm font-bold text-on-primary">
-                  Visualize Map
-                </button>
-                <button className="rounded-lg bg-surface-container-lowest px-6 py-2 text-sm font-bold text-primary">
-                  Review Conflicts
-                </button>
+                <button className="rounded-lg bg-primary px-6 py-2 text-sm font-bold text-on-primary">Visualize Map</button>
+                <button className="rounded-lg bg-surface-container-lowest px-6 py-2 text-sm font-bold text-primary">Review Conflicts</button>
               </div>
             </div>
             <div className="relative aspect-video w-full overflow-hidden rounded-lg border-2 border-primary/10 bg-surface-container-highest md:w-1/3">
               <div className="absolute inset-0 flex items-center justify-center">
                 <span className="material-symbols-outlined text-6xl text-primary/20">hub</span>
               </div>
-              <div className="absolute bottom-2 right-2 rounded bg-primary/80 px-2 py-1 font-label text-[8px] text-on-primary">
-                LIVE GRAPH
-              </div>
+              <div className="absolute bottom-2 right-2 rounded bg-primary/80 px-2 py-1 font-label text-[8px] text-on-primary">LIVE GRAPH</div>
             </div>
           </div>
         </div>
@@ -304,8 +289,8 @@ function DocumentCard({
   doc,
   onDelete,
 }: {
-  doc: DocumentItem
-  onDelete: (doc: DocumentItem) => void
+  doc: ConvexDocument
+  onDelete: (doc: ConvexDocument) => void
 }) {
   const typeColors: Record<string, string> = {
     CEA_GUIDELINE: 'border-primary text-primary',

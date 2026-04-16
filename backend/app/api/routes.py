@@ -40,9 +40,9 @@ def _get_vector_store():
     from app.services.vector_store import vector_store
     return vector_store
 
-def _get_firebase():
-    from app.services.firebase_service import firebase_service
-    return firebase_service
+def _get_persistence():
+    from app.services.convex_service import convex_service
+    return convex_service
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -145,13 +145,13 @@ async def upload_document(
 
         processor = _get_document_processor()
         vs = _get_vector_store()
-        fb = _get_firebase()
+        storage = _get_persistence()
 
         processed = await processor.process_file(filename, content, custom_metadata)
         chunks_added = vs.add_documents(processed.chunks, processed.doc_id)
 
-        # Persist metadata to Firebase
-        fb.save_document_metadata(processed.doc_id, {
+        # Persist metadata to Convex
+        storage.save_document_metadata(processed.doc_id, {
             **processed.metadata,
             "chunks_count": chunks_added,
         })
@@ -190,7 +190,7 @@ async def batch_upload_documents(files: List[UploadFile] = File(...)):
     """Upload and process multiple documents in batch."""
     processor = _get_document_processor()
     vs = _get_vector_store()
-    fb = _get_firebase()
+    storage = _get_persistence()
     processed_docs = []
     errors = []
 
@@ -212,7 +212,7 @@ async def batch_upload_documents(files: List[UploadFile] = File(...)):
             processed = await processor.process_file(filename, content)
             chunks_added = vs.add_documents(processed.chunks, processed.doc_id)
 
-            fb.save_document_metadata(processed.doc_id, {
+            storage.save_document_metadata(processed.doc_id, {
                 **processed.metadata,
                 "chunks_count": chunks_added,
             })
@@ -242,12 +242,12 @@ async def batch_upload_documents(files: List[UploadFile] = File(...)):
 
 @router.get("/documents/list")
 async def list_documents():
-    """List all documents — reads from Firebase (authoritative) with vector store fallback."""
+    """List all documents — reads from Convex (authoritative) with vector store fallback."""
     try:
-        fb = _get_firebase()
-        docs = fb.list_documents()
+        storage = _get_persistence()
+        docs = storage.list_documents()
 
-        # If Firebase has data, use it. Otherwise fall back to vector store scan.
+        # If Convex has data, use it. Otherwise fall back to vector store scan.
         if docs:
             return {"documents": docs, "total": len(docs)}
 
@@ -266,13 +266,13 @@ async def list_documents():
 
 @router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    """Delete a document from both vector store and Firebase."""
+    """Delete a document from both vector store and Convex."""
     try:
         vs = _get_vector_store()
-        fb = _get_firebase()
+        storage = _get_persistence()
 
         success = vs.delete_document(doc_id)
-        fb.delete_document_metadata(doc_id)
+        storage.delete_document_metadata(doc_id)
 
         if success:
             return {"status": "success", "message": f"Document {doc_id} deleted"}
@@ -297,12 +297,12 @@ async def delete_document(doc_id: str):
 
 @router.post("/chat/message")
 async def save_chat_message(request: ChatMessageRequest):
-    """Persist a chat message to Firebase."""
+    """Persist a chat message to Convex."""
     try:
-        fb = _get_firebase()
+        storage = _get_persistence()
         msg_data = request.model_dump()
         session_id = msg_data.pop("session_id")
-        fb.save_chat_message(session_id, msg_data)
+        storage.save_chat_message(session_id, msg_data)
         return {"status": "ok"}
     except Exception as e:
         logger.error("chat_save_error", error=str(e))
@@ -316,8 +316,8 @@ async def save_chat_message(request: ChatMessageRequest):
 async def get_chat_history(session_id: str):
     """Retrieve full chat history for a session."""
     try:
-        fb = _get_firebase()
-        session = fb.get_chat_history(session_id)
+        storage = _get_persistence()
+        session = storage.get_chat_history(session_id)
         if not session:
             return ChatSessionResponse(session_id=session_id, messages=[])
         return ChatSessionResponse(**session)
@@ -333,8 +333,8 @@ async def get_chat_history(session_id: str):
 async def list_chat_sessions():
     """List all chat sessions."""
     try:
-        fb = _get_firebase()
-        sessions = fb.list_chat_sessions()
+        storage = _get_persistence()
+        sessions = storage.list_chat_sessions()
         return {"sessions": sessions}
     except Exception as e:
         logger.error("chat_sessions_error", error=str(e))
@@ -352,8 +352,8 @@ async def list_chat_sessions():
 async def get_settings_route():
     """Retrieve user settings."""
     try:
-        fb = _get_firebase()
-        return fb.get_settings()
+        storage = _get_persistence()
+        return storage.get_settings()
     except Exception as e:
         logger.error("settings_get_error", error=str(e))
         raise HTTPException(status_code=500, detail={"message": str(e)})
@@ -363,9 +363,9 @@ async def get_settings_route():
 async def save_settings_route(request: UserSettingsRequest):
     """Persist user settings."""
     try:
-        fb = _get_firebase()
+        storage = _get_persistence()
         data = {k: v for k, v in request.model_dump().items() if v is not None}
-        fb.save_settings(data)
+        storage.save_settings(data)
         return {"status": "ok"}
     except Exception as e:
         logger.error("settings_save_error", error=str(e))
@@ -400,7 +400,7 @@ async def health_check():
     """Health check endpoint to verify service status."""
     try:
         vs = _get_vector_store()
-        fb = _get_firebase()
+        storage = _get_persistence()
         stats = vs.get_collection_stats()
 
         return HealthResponse(
@@ -409,7 +409,7 @@ async def health_check():
             vector_store=stats,
             llm_provider=settings.DEFAULT_LLM_PROVIDER,
             llm_model=settings.DEFAULT_LLM_MODEL,
-            firebase_connected=fb.is_connected,
+            convex_connected=storage.is_connected,
         )
     except Exception as e:
         logger.error("health_check_failed", error=str(e))
