@@ -15,6 +15,7 @@ Focus areas:
 - Document processing and ingestion
 - Vector indexing and retrieval behavior
 - API guardrails (auth, rate limiting, request context)
+- Security headers, request-size guardrails, and trusted-proxy client IP derivation
 
 Key files:
 - `backend/app/api/routes.py` - API endpoints and dependency guardrails
@@ -114,6 +115,7 @@ If `BACKEND_API_KEY` is set, include `X-API-Key` in requests to protected API ro
 - Raise domain exceptions (`PowergridException` family) where possible
 - Use structured logs with stable keys for observability
 - Keep API contracts in `models.py` and route logic in `routes.py`
+- Keep `.env.example` in sync when adding middleware/security controls
 
 ### Frontend
 - Use strict TypeScript types for API payloads and store state
@@ -128,6 +130,12 @@ If `BACKEND_API_KEY` is set, include `X-API-Key` in requests to protected API ro
 2. Ensure upload/query handling uses the enum in `backend/app/api/routes.py`
 3. Verify option appears automatically via `GET /api/v1/metadata/options`
 4. Confirm frontend forms/filters consume the new option without hardcoded values
+
+### Extend persisted chat metadata
+1. Update `ChatMessageRequest` in `backend/app/api/models.py`
+2. Pass through new fields in `backend/app/services/convex_service.py`
+3. Update `frontend/convex/schema.ts` and `frontend/convex/chat.ts`
+4. Update frontend payload/types in `frontend/src/lib/api.ts` and `frontend/src/lib/convexApi.ts`
 
 ### Add a new LLM provider
 1. Implement provider branch in `backend/app/services/llm_service.py`

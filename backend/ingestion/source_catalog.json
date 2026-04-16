@@ -1,0 +1,769 @@
+{
+  "catalog_version": "2026-04-16",
+  "description": "Curated source registry for POWERGRID Operations RAG ingestion.",
+  "sources": [
+    {
+      "id": "pgcil_annual_reports",
+      "category": "official_powergrid",
+      "title": "POWERGRID Annual Reports (2018-2024)",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/annual-report"
+      ],
+      "extract_focus": [
+        "Outage statistics",
+        "Asset portfolio data",
+        "Project implementation summaries",
+        "Financial and operational disclosures"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_sustainability_reports",
+      "category": "official_powergrid",
+      "title": "POWERGRID Sustainability Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/sustainability-reports"
+      ],
+      "extract_focus": [
+        "ESG indicators",
+        "Environmental compliance data",
+        "Tower and right-of-way statistics"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_technical_standards",
+      "category": "official_powergrid",
+      "title": "POWERGRID Technical Standards",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/technical-standards"
+      ],
+      "extract_focus": [
+        "Maintenance specifications",
+        "Equipment ratings",
+        "Inspection and testing protocols"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_transmission_performance",
+      "category": "official_powergrid",
+      "title": "Transmission System Performance Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/transmission-system-performance"
+      ],
+      "extract_focus": [
+        "Tripping events",
+        "System availability",
+        "Reliability indices"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_media_centre",
+      "category": "official_powergrid",
+      "title": "POWERGRID Media Centre",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/media-centre"
+      ],
+      "extract_focus": [
+        "Policy updates",
+        "New projects",
+        "Circular and tender outcomes"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "pgcil_csr_reports",
+      "category": "official_powergrid",
+      "title": "POWERGRID CSR Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.powergridindia.com/en/csr-report"
+      ],
+      "extract_focus": [
+        "Community impact metrics",
+        "Environmental and social outcomes"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "cea_cybersecurity_guidelines",
+      "category": "regulatory",
+      "title": "CEA Guidelines 2021 (Cybersecurity)",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://cea.nic.in/publications/"
+      ],
+      "extract_focus": [
+        "Cybersecurity mandates for utilities",
+        "Compliance controls",
+        "Audit and governance requirements"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "cea_technical_standards",
+      "category": "regulatory",
+      "title": "CEA Technical Standards",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://cea.nic.in/en/technical-standards"
+      ],
+      "extract_focus": [
+        "Grid connectivity requirements",
+        "Substation specifications",
+        "Protection standards"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "cea_annual_reports",
+      "category": "regulatory",
+      "title": "CEA Annual Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://cea.nic.in/en/annual-report"
+      ],
+      "extract_focus": [
+        "National grid data",
+        "Capacity additions",
+        "Growth and modernization plans"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "cerc_regulations",
+      "category": "regulatory",
+      "title": "CERC Orders and Regulations",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.cercind.gov.in/regulation.html"
+      ],
+      "extract_focus": [
+        "Tariff orders",
+        "Grid code",
+        "Deviation settlement mechanisms"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "pgcil_iegc_via_cerc",
+      "category": "regulatory",
+      "title": "Indian Electricity Grid Code (IEGC)",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.cercind.gov.in/regulation.html"
+      ],
+      "extract_focus": [
+        "Scheduling",
+        "Frequency control",
+        "Protection and compliance obligations"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "powermin_circulars",
+      "category": "regulatory",
+      "title": "Ministry of Power Circulars",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://powermin.gov.in"
+      ],
+      "extract_focus": [
+        "Policy notifications",
+        "Scheme implementation guidelines"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "bis_standards_search",
+      "category": "regulatory",
+      "title": "BIS Standards Search",
+      "priority": "secondary",
+      "source_type": "standards_summary",
+      "ingestion_method": "manual_clause_curation_then_ingest",
+      "urls": [
+        "https://www.bis.gov.in"
+      ],
+      "extract_focus": [
+        "IS standards relevant to substations and transformers",
+        "Publicly available summaries"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "posoco_daily_reports",
+      "category": "grid_operations",
+      "title": "POSOCO Daily Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://posoco.in/reports/daily-reports/"
+      ],
+      "extract_focus": [
+        "Daily and weekly load",
+        "Frequency excursions",
+        "Islanding events"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "nldc_monthly_reports",
+      "category": "grid_operations",
+      "title": "NLDC Monthly Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://posoco.in/reports/monthly-reports/"
+      ],
+      "extract_focus": [
+        "Regional energy summaries",
+        "Deviation trends"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "erldc_reports",
+      "category": "grid_operations",
+      "title": "ERLDC Reports",
+      "priority": "primary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://erldc.org.in"
+      ],
+      "extract_focus": [
+        "Eastern region load data",
+        "Outage summaries",
+        "Operational advisories"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "grid_india_dashboard",
+      "category": "grid_operations",
+      "title": "GRID-INDIA Real-Time Dashboard",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.grid-india.in/"
+      ],
+      "extract_focus": [
+        "Live grid context",
+        "Operational snapshots"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "merit_india_dispatch",
+      "category": "grid_operations",
+      "title": "MERIT India Dispatch Data",
+      "priority": "secondary",
+      "source_type": "tabular",
+      "ingestion_method": "download_csv_or_excel_then_tabular_chunking",
+      "urls": [
+        "https://www.meritindia.in"
+      ],
+      "extract_focus": [
+        "Merit order dispatch",
+        "Station-wise generation",
+        "Variable cost data"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "ieee_c57_series",
+      "category": "technical_bodies",
+      "title": "IEEE C57 Series",
+      "priority": "secondary",
+      "source_type": "standards_summary",
+      "ingestion_method": "ingest_public_abstracts_or_permitted_summaries",
+      "urls": [
+        "https://ieeexplore.ieee.org"
+      ],
+      "extract_focus": [
+        "Transformer diagnostics",
+        "DGA guidance summaries"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "iec_standards_summaries",
+      "category": "technical_bodies",
+      "title": "IEC Standards Summaries",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_public_summary_pages_only",
+      "urls": [
+        "https://www.iec.ch"
+      ],
+      "extract_focus": [
+        "IEC 61850 and related summary guidance",
+        "Insulator and automation standards overviews"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "cigre_brochures",
+      "category": "technical_bodies",
+      "title": "CIGRE Technical Brochures",
+      "priority": "secondary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.cigre.org"
+      ],
+      "extract_focus": [
+        "Asset management",
+        "Transformer aging",
+        "HVDC operations"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "epri_reports",
+      "category": "technical_bodies",
+      "title": "EPRI Public Research Reports",
+      "priority": "secondary",
+      "source_type": "pdf_catalog",
+      "ingestion_method": "crawl_catalog_for_pdf_then_ingest_pdf",
+      "urls": [
+        "https://www.epri.com/research"
+      ],
+      "extract_focus": [
+        "Predictive maintenance",
+        "Vegetation management"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_rd_web",
+      "category": "webpages",
+      "title": "POWERGRID Technology Development R&D",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.powergridindia.com/en/technology-development-rd"
+      ],
+      "extract_focus": [
+        "R&D initiatives",
+        "Technology modernization"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_it_ot_convergence_web",
+      "category": "webpages",
+      "title": "POWERGRID IT-OT Convergence",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.powergridindia.com/en/it-ot-convergence"
+      ],
+      "extract_focus": [
+        "Operational digitization",
+        "IT-OT integration themes"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "pgcil_cyber_security_web",
+      "category": "webpages",
+      "title": "POWERGRID Cyber Security",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.powergridindia.com/en/cyber-security"
+      ],
+      "extract_focus": [
+        "Cybersecurity posture",
+        "Controls and governance"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "pgcil_smart_grid_web",
+      "category": "webpages",
+      "title": "POWERGRID Smart Grid",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.powergridindia.com/en/smart-grid"
+      ],
+      "extract_focus": [
+        "Smart grid initiatives",
+        "Digital operations"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "pgcil_transmission_projects_web",
+      "category": "webpages",
+      "title": "POWERGRID Transmission Projects",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.powergridindia.com/en/transmission-projects"
+      ],
+      "extract_focus": [
+        "Project status",
+        "Network expansion"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "powerline_it_ot_article",
+      "category": "webpages",
+      "title": "Powerline: IT-OT Convergence",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://powerline.net.in/2025/11/18/powergrid-enhancing-operations-through-it-ot-convergence/"
+      ],
+      "extract_focus": [
+        "Industry narrative",
+        "Operational improvements"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "powerline_transmission_category",
+      "category": "webpages",
+      "title": "Powerline Transmission Category",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://powerline.net.in/category/transmission/"
+      ],
+      "extract_focus": [
+        "Transmission sector updates",
+        "Operational trends"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "cea_technical_standards_web",
+      "category": "webpages",
+      "title": "CEA Technical Standards Page",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://cea.nic.in/en/technical-standards"
+      ],
+      "extract_focus": [
+        "Regulatory context",
+        "Publication navigation"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "cea_annual_report_web",
+      "category": "webpages",
+      "title": "CEA Annual Report Page",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://cea.nic.in/en/annual-report"
+      ],
+      "extract_focus": [
+        "Regulatory publication context"
+      ],
+      "default_metadata": {
+        "doc_type": "CEA_GUIDELINE"
+      }
+    },
+    {
+      "id": "grid_india_home_web",
+      "category": "webpages",
+      "title": "GRID-INDIA Home",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://www.grid-india.in/"
+      ],
+      "extract_focus": [
+        "Current operational context"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "posoco_reports_web",
+      "category": "webpages",
+      "title": "POSOCO Reports Index",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://posoco.in/reports/"
+      ],
+      "extract_focus": [
+        "Report index context",
+        "Operations updates"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "erldc_home_web",
+      "category": "webpages",
+      "title": "ERLDC Home",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://erldc.org.in/"
+      ],
+      "extract_focus": [
+        "Regional operations context"
+      ],
+      "default_metadata": {
+        "doc_type": "TECHNICAL_MANUAL"
+      }
+    },
+    {
+      "id": "powermin_overview_web",
+      "category": "webpages",
+      "title": "Ministry of Power Overview",
+      "priority": "secondary",
+      "source_type": "webpage",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://powermin.gov.in/en/content/overview"
+      ],
+      "extract_focus": [
+        "Policy context",
+        "Institutional overview"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    },
+    {
+      "id": "wikipedia_electric_power_transmission",
+      "category": "encyclopedia",
+      "title": "Wikipedia: Electric power transmission",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Electric_power_transmission"
+      ],
+      "extract_focus": [
+        "Background context"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "wikipedia_hvdc",
+      "category": "encyclopedia",
+      "title": "Wikipedia: High-voltage direct current",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/HVDC"
+      ],
+      "extract_focus": [
+        "HVDC concept support"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "wikipedia_transformer",
+      "category": "encyclopedia",
+      "title": "Wikipedia: Transformer (electrical)",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Transformer"
+      ],
+      "extract_focus": [
+        "Transformer background"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "wikipedia_dga",
+      "category": "encyclopedia",
+      "title": "Wikipedia: Dissolved gas analysis",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Dissolved_gas_analysis"
+      ],
+      "extract_focus": [
+        "DGA background"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "wikipedia_power_system_protection",
+      "category": "encyclopedia",
+      "title": "Wikipedia: Power system protection",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Power_system_protection"
+      ],
+      "extract_focus": [
+        "Protection concepts"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "wikipedia_substation",
+      "category": "encyclopedia",
+      "title": "Wikipedia: Electrical substation",
+      "priority": "background",
+      "source_type": "wikipedia",
+      "ingestion_method": "ingest_live_webpage_text",
+      "urls": [
+        "https://en.wikipedia.org/wiki/Electrical_substation"
+      ],
+      "extract_focus": [
+        "Substation layout and terminology"
+      ],
+      "default_metadata": {
+        "doc_type": "TEXT_DOCUMENT"
+      }
+    },
+    {
+      "id": "youtube_powergrid_official",
+      "category": "video_transcripts",
+      "title": "POWERGRID Official YouTube Channel",
+      "priority": "secondary",
+      "source_type": "youtube",
+      "ingestion_method": "fetch_transcripts_then_ingest_text",
+      "urls": [
+        "https://www.youtube.com/@powergridindia_official"
+      ],
+      "extract_focus": [
+        "Operational webinars",
+        "Executive talks",
+        "Grid modernization commentary"
+      ],
+      "default_metadata": {
+        "doc_type": "IT_CIRCULAR"
+      }
+    }
+  ]
+}

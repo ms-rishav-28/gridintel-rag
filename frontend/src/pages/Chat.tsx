@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useNavigate } from 'react-router-dom'
 import {
   getMetadataOptions,
   queryDocuments,
@@ -17,11 +18,14 @@ interface ChatMessage {
   citations?: Citation[]
   confidence?: number
   modelUsed?: string
+  provider?: string
   queryTimeMs?: number
   documentsRetrieved?: number
+  isInsufficient?: boolean
 }
 
 const SESSION_KEY = 'powergrid_session_id'
+const CHAT_PREFILL_KEY = 'powergrid_chat_prefill'
 
 function getOrCreateSessionId() {
   const existing = sessionStorage.getItem(SESSION_KEY)
@@ -39,6 +43,7 @@ function createNewSessionId() {
 }
 
 const Chat = () => {
+  const navigate = useNavigate()
   const [sessionId, setSessionId] = useState(() => getOrCreateSessionId())
   const [inputValue, setInputValue] = useState('')
   const [selectedEquipment, setSelectedEquipment] = useState('')
@@ -66,9 +71,20 @@ const Chat = () => {
       citations: (message.citations as Citation[] | undefined) ?? [],
       confidence: message.confidence,
       modelUsed: message.model_used,
+      provider: message.provider,
       queryTimeMs: message.query_time_ms,
+      documentsRetrieved: message.documents_retrieved,
+      isInsufficient: message.is_insufficient,
     }))
   }, [session?.messages])
+
+  useEffect(() => {
+    const prefill = sessionStorage.getItem(CHAT_PREFILL_KEY)
+    if (!prefill) return
+
+    setInputValue(prefill)
+    sessionStorage.removeItem(CHAT_PREFILL_KEY)
+  }, [])
 
   useEffect(() => {
     const loadMetadata = async () => {
@@ -138,7 +154,10 @@ const Chat = () => {
         citations: response.citations,
         confidence: response.confidence,
         model_used: response.model_used,
+        provider: response.provider,
         query_time_ms: response.query_time_ms,
+        documents_retrieved: response.documents_retrieved,
+        is_insufficient: response.is_insufficient,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to get response from backend.'
@@ -331,7 +350,12 @@ const Chat = () => {
           <div className="mx-auto max-w-5xl">
             <div className="rounded-2xl bg-surface-container-lowest p-2 shadow-lg ring-2 ring-blue-100 transition-all focus-within:ring-primary">
               <div className="flex items-center gap-2">
-                <button className="rounded-xl p-3 text-slate-400 transition-colors hover:text-primary" aria-label="Attach file">
+                <button
+                  onClick={() => navigate('/knowledge-base')}
+                  className="rounded-xl p-3 text-slate-400 transition-colors hover:text-primary"
+                  aria-label="Attach file"
+                  title="Open Knowledge Base upload"
+                >
                   <span className="material-symbols-outlined">attach_file</span>
                 </button>
                 <input
@@ -507,6 +531,12 @@ function AssistantBubble({ message }: { message: ChatMessage }) {
               <span className="flex items-center gap-1">
                 <span className="material-symbols-outlined text-sm">memory</span>
                 {message.modelUsed}
+              </span>
+            )}
+            {message.provider && (
+              <span className="flex items-center gap-1">
+                <span className="material-symbols-outlined text-sm">cloud</span>
+                {message.provider}
               </span>
             )}
             {message.documentsRetrieved !== undefined && (

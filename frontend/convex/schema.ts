@@ -33,7 +33,10 @@ export default defineSchema({
     citations: v.optional(v.array(v.any())),
     confidence: v.optional(v.number()),
     model_used: v.optional(v.string()),
+    provider: v.optional(v.string()),
     query_time_ms: v.optional(v.number()),
+    documents_retrieved: v.optional(v.number()),
+    is_insufficient: v.optional(v.boolean()),
   })
     .index("by_session_id", ["session_id"])
     .index("by_session_timestamp", ["session_id", "timestamp"]),

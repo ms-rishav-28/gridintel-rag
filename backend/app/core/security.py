@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import secrets
 import time
 from collections import defaultdict, deque
 from threading import Lock
@@ -42,16 +44,78 @@ class _InMemoryRateLimiter:
 rate_limiter = _InMemoryRateLimiter()
 
 
+def _ip_matches_trusted_networks(ip_value: str, trusted_values: list[str]) -> bool:
+    """Check if IP matches explicit trusted proxy IP/CIDR definitions."""
+    if not trusted_values:
+        return False
+
+    try:
+        ip_obj = ipaddress.ip_address(ip_value)
+    except ValueError:
+        return False
+
+    for trusted in trusted_values:
+        candidate = trusted.strip()
+        if not candidate:
+            continue
+
+        try:
+            if "/" in candidate:
+                if ip_obj in ipaddress.ip_network(candidate, strict=False):
+                    return True
+            else:
+                if ip_obj == ipaddress.ip_address(candidate):
+                    return True
+        except ValueError:
+            continue
+
+    return False
+
+
+def _should_trust_forward_headers(request: Request) -> bool:
+    """Determine whether forwarded headers can be trusted for client-IP derivation."""
+    if not settings.TRUST_PROXY_HEADERS:
+        return False
+
+    if not request.client or not request.client.host:
+        return False
+
+    # If no explicit allow-list is provided, trust proxy headers when enabled.
+    if not settings.TRUSTED_PROXY_IPS:
+        return True
+
+    return _ip_matches_trusted_networks(request.client.host, settings.TRUSTED_PROXY_IPS)
+
+
+def _extract_first_valid_ip(raw: str) -> str | None:
+    """Return first valid IP from comma-separated header values."""
+    for candidate in raw.split(","):
+        value = candidate.strip()
+        if not value:
+            continue
+        try:
+            ipaddress.ip_address(value)
+            return value
+        except ValueError:
+            continue
+    return None
+
+
 def get_client_ip(request: Request) -> str:
     """Extract client IP, considering common proxy forwarding headers."""
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        # X-Forwarded-For may contain a comma-separated list.
-        return forwarded_for.split(",")[0].strip()
+    if _should_trust_forward_headers(request):
+        forwarded_for = request.headers.get("x-forwarded-for", "")
+        parsed_forwarded = _extract_first_valid_ip(forwarded_for)
+        if parsed_forwarded:
+            return parsed_forwarded
 
-    real_ip = request.headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if real_ip:
+            try:
+                ipaddress.ip_address(real_ip)
+                return real_ip
+            except ValueError:
+                pass
 
     if request.client and request.client.host:
         return request.client.host
@@ -84,7 +148,7 @@ async def enforce_api_key(request: Request) -> None:
         settings.API_KEY_HEADER.lower()
     )
 
-    if incoming_key != settings.BACKEND_API_KEY:
+    if not incoming_key or not secrets.compare_digest(incoming_key, settings.BACKEND_API_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={

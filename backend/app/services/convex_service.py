@@ -139,7 +139,10 @@ class ConvexService:
             "citations": message.get("citations", []),
             "confidence": message.get("confidence"),
             "model_used": message.get("model_used"),
+            "provider": message.get("provider"),
             "query_time_ms": message.get("query_time_ms"),
+            "documents_retrieved": message.get("documents_retrieved"),
+            "is_insufficient": message.get("is_insufficient"),
         }
 
         try:

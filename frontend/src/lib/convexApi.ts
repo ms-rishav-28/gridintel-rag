@@ -19,7 +19,10 @@ export interface ConvexChatMessage {
   citations?: unknown[]
   confidence?: number
   model_used?: string
+  provider?: string
   query_time_ms?: number
+  documents_retrieved?: number
+  is_insufficient?: boolean
 }
 
 export interface ConvexChatSession {
@@ -62,7 +65,10 @@ export const convexApi = {
         citations?: unknown[]
         confidence?: number
         model_used?: string
+        provider?: string
         query_time_ms?: number
+        documents_retrieved?: number
+        is_insufficient?: boolean
       },
       { status: string; session_id: string }
     >('chat:saveMessage'),

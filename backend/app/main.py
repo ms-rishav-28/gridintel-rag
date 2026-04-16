@@ -89,6 +89,23 @@ async def request_context_middleware(request: Request, call_next):
     request.state.request_id = request_id
     start = time.perf_counter()
 
+    max_body_bytes = settings.MAX_REQUEST_BODY_MB * 1024 * 1024
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            body_size = int(content_length)
+            if body_size > max_body_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "error_code": "REQUEST_TOO_LARGE",
+                        "message": f"Request exceeds {settings.MAX_REQUEST_BODY_MB}MB limit",
+                        "request_id": request_id,
+                    },
+                )
+        except ValueError:
+            pass
+
     response = await call_next(request)
 
     duration_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -96,6 +113,18 @@ async def request_context_middleware(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    if settings.ENABLE_SECURITY_HEADERS:
+        path = request.url.path
+        if path not in {"/docs", "/redoc", "/openapi.json"}:
+            response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+            response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+
+    if settings.ENABLE_HSTS and request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = (
+            f"max-age={settings.HSTS_MAX_AGE_SECONDS}; includeSubDomains"
+        )
 
     logger.info(
         "request_completed",

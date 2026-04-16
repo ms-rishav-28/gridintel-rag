@@ -1,7 +1,7 @@
 """Pydantic models for API requests and responses."""
 
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 from enum import Enum
 
 
@@ -63,6 +63,15 @@ class QueryRequest(BaseModel):
         True,
         description="Enable fallback search strategies if no results found"
     )
+
+
+class UrlIngestionRequest(BaseModel):
+    """Request model for ingesting web content from a URL."""
+
+    url: HttpUrl = Field(..., description="HTTP/HTTPS URL to ingest")
+    doc_type: Optional[DocumentType] = Field(None, description="Optional document type override")
+    equipment_type: Optional[EquipmentType] = Field(None, description="Optional equipment type")
+    voltage_level: Optional[VoltageLevel] = Field(None, description="Optional voltage level")
 
 
 class Citation(BaseModel):
@@ -133,10 +142,14 @@ class ChatMessageRequest(BaseModel):
     session_id: str = Field(..., description="Chat session ID")
     role: str = Field(..., description="Message role: 'user' or 'assistant'")
     content: str = Field(..., description="Message content")
+    timestamp: Optional[str] = Field(None, description="ISO timestamp for the message")
     citations: Optional[List[Citation]] = Field(None, description="Citations for assistant messages")
     confidence: Optional[float] = Field(None, description="Confidence score")
     model_used: Optional[str] = Field(None, description="LLM model used")
+    provider: Optional[str] = Field(None, description="LLM provider used")
     query_time_ms: Optional[float] = Field(None, description="Query time in ms")
+    documents_retrieved: Optional[int] = Field(None, description="Number of retrieved docs")
+    is_insufficient: Optional[bool] = Field(None, description="Whether response lacked sufficient context")
 
 
 class ChatSessionResponse(BaseModel):

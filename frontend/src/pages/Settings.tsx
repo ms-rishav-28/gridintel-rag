@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { getHealth, getStats, type HealthResponse } from '../lib/api'
 import { convexApi } from '../lib/convexApi'
@@ -20,6 +21,7 @@ interface StatsData {
 }
 
 const Settings = () => {
+  const navigate = useNavigate()
   const settingsData = useQuery(convexApi.settings.getSettings, {})
   const saveSettings = useMutation(convexApi.settings.upsertSettings)
 
@@ -121,6 +123,16 @@ const Settings = () => {
       email: settingsData?.profile?.email || 'engineer@powergrid.local',
     })
     document.documentElement.classList.remove('dark')
+  }
+
+  const handleCredentialCardClick = async () => {
+    const hint = 'X-API-Key: <your-backend-api-key>'
+    try {
+      await navigator.clipboard.writeText(hint)
+      toast.success('API header template copied to clipboard.')
+    } catch {
+      toast('Set VITE_BACKEND_API_KEY and BACKEND_API_KEY with the same value.')
+    }
   }
 
   return (
@@ -297,11 +309,13 @@ const Settings = () => {
                 icon="key"
                 title="Access Credentials"
                 subtitle="API key and role policy are managed by deployment env vars"
+                onClick={() => void handleCredentialCardClick()}
               />
               <ActionCard
                 icon="history"
                 title="Analysis Audit Log"
                 subtitle="All persisted chat sessions are available in Convex"
+                onClick={() => navigate('/chat')}
               />
             </div>
           </div>
@@ -440,9 +454,22 @@ function ToggleRow({
   )
 }
 
-function ActionCard({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {
+function ActionCard({
+  icon,
+  title,
+  subtitle,
+  onClick,
+}: {
+  icon: string
+  title: string
+  subtitle: string
+  onClick?: () => void
+}) {
   return (
-    <button className="group flex w-full items-center justify-between rounded-xl bg-surface-container-lowest p-4 transition-colors hover:bg-white">
+    <button
+      onClick={onClick}
+      className="group flex w-full items-center justify-between rounded-xl bg-surface-container-lowest p-4 transition-colors hover:bg-white"
+    >
       <div className="flex items-center gap-4">
         <span className="material-symbols-outlined text-primary">{icon}</span>
         <div className="text-left">

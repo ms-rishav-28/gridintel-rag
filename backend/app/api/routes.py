@@ -10,7 +10,8 @@ from app.api.models import (
     DocumentBatchUploadResponse, HealthResponse, ErrorResponse,
     EquipmentType, VoltageLevel, DocumentType,
     ChatMessageRequest, ChatSessionResponse,
-    UserSettingsRequest, MetadataOptionsResponse, MetadataOption
+    UserSettingsRequest, MetadataOptionsResponse, MetadataOption,
+    UrlIngestionRequest,
 )
 from app.core.config import get_settings
 from app.core.exceptions import PowergridException, RAGQueryError, DocumentProcessingError
@@ -182,6 +183,59 @@ async def upload_document(
             "error_code": "UPLOAD_FAILED",
             "message": "Failed to process document",
             "details": {"error": str(e)}
+        })
+
+
+@router.post("/documents/upload-url", response_model=DocumentUploadResponse)
+async def upload_document_from_url(request: UrlIngestionRequest):
+    """Fetch and ingest a document/webpage directly from URL."""
+    try:
+        custom_metadata = {}
+        if request.doc_type:
+            custom_metadata["doc_type"] = request.doc_type.value
+        if request.equipment_type:
+            custom_metadata["equipment_type"] = request.equipment_type.value
+        if request.voltage_level:
+            custom_metadata["voltage_level"] = request.voltage_level.value
+
+        processor = _get_document_processor()
+        vs = _get_vector_store()
+        storage = _get_persistence()
+
+        processed = await processor.process_url(str(request.url), custom_metadata)
+        chunks_added = vs.add_documents(processed.chunks, processed.doc_id)
+
+        storage.save_document_metadata(processed.doc_id, {
+            **processed.metadata,
+            "chunks_count": chunks_added,
+        })
+
+        return DocumentUploadResponse(
+            doc_id=processed.doc_id,
+            filename=processed.metadata.get("source", str(request.url)),
+            doc_type=processed.metadata.get("doc_type", "UNKNOWN"),
+            chunks_processed=chunks_added,
+            file_hash=processed.file_hash,
+            equipment_type=processed.metadata.get("equipment_type"),
+            voltage_level=processed.metadata.get("voltage_level"),
+            status="success",
+        )
+
+    except DocumentProcessingError as e:
+        logger.error("url_upload_error", error=str(e), url=str(request.url))
+        raise HTTPException(status_code=400, detail={
+            "error_code": e.error_code,
+            "message": e.message,
+            "details": e.details,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("unexpected_url_upload_error", error=str(e), url=str(request.url))
+        raise HTTPException(status_code=500, detail={
+            "error_code": "URL_UPLOAD_FAILED",
+            "message": "Failed to ingest URL content",
+            "details": {"error": str(e)},
         })
 
 

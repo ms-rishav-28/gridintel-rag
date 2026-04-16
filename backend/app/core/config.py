@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     BACKEND_API_KEY: Optional[str] = None
     API_KEY_HEADER: str = "X-API-Key"
+    MAX_REQUEST_BODY_MB: int = 55
+    TRUST_PROXY_HEADERS: bool = False
+    TRUSTED_PROXY_IPS: List[str] = []
+    ENABLE_SECURITY_HEADERS: bool = True
+    ENABLE_HSTS: bool = True
+    HSTS_MAX_AGE_SECONDS: int = 31536000
 
     # Convex
     CONVEX_URL: Optional[str] = None

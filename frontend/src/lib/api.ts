@@ -81,6 +81,13 @@ export interface DocumentUploadResponse {
   status: string
 }
 
+export interface UrlIngestionRequest {
+  url: string
+  doc_type?: string
+  equipment_type?: string
+  voltage_level?: string
+}
+
 export interface HealthResponse {
   status: string
   version: string
@@ -114,7 +121,10 @@ export interface ChatMessagePayload {
   citations?: Citation[]
   confidence?: number
   model_used?: string
+  provider?: string
   query_time_ms?: number
+  documents_retrieved?: number
+  is_insufficient?: boolean
 }
 
 export interface ChatSession {
@@ -172,6 +182,13 @@ export async function uploadDocument(
   const response = await api.post<DocumentUploadResponse>('/documents/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
+  return response.data
+}
+
+export async function uploadDocumentFromUrl(
+  payload: UrlIngestionRequest,
+): Promise<DocumentUploadResponse> {
+  const response = await api.post<DocumentUploadResponse>('/documents/upload-url', payload)
   return response.data
 }
 

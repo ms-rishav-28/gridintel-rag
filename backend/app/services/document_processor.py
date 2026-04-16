@@ -3,11 +3,17 @@
 import os
 import io
 import hashlib
+import ipaddress
+import re
+import socket
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
+from urllib.parse import unquote, urlparse
 
+import httpx
 from langchain.schema import Document as LangChainDocument
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
@@ -22,6 +28,50 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Extract visible text from an HTML page."""
+
+    _block_tags = {
+        "p", "div", "br", "li", "section", "article", "header", "footer",
+        "h1", "h2", "h3", "h4", "h5", "h6", "tr", "td", "th",
+    }
+    _skip_tags = {"script", "style", "noscript", "svg", "canvas"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs):
+        tag_name = tag.lower()
+        if tag_name in self._skip_tags:
+            self._skip_depth += 1
+        if self._skip_depth == 0 and tag_name in self._block_tags:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str):
+        tag_name = tag.lower()
+        if tag_name in self._skip_tags and self._skip_depth > 0:
+            self._skip_depth -= 1
+            return
+        if self._skip_depth == 0 and tag_name in self._block_tags:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str):
+        if self._skip_depth > 0:
+            return
+        cleaned = data.strip()
+        if cleaned:
+            self._parts.append(cleaned)
+
+    def get_text(self) -> str:
+        raw_text = " ".join(self._parts)
+        normalized = re.sub(r"\s*\n\s*", "\n", raw_text)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"[ \t]{2,}", " ", normalized)
+        return normalized.strip()
 
 
 @dataclass
@@ -109,6 +159,129 @@ class DocumentProcessor:
             metadata['voltage_level'] = f"{voltage_matches[0]} kV"
         
         return metadata
+
+    def _validate_source_url(self, url: str) -> str:
+        """Validate URL format and block local/private network targets."""
+        normalized_url = url.strip()
+        parsed = urlparse(normalized_url)
+
+        if parsed.scheme not in {"http", "https"}:
+            raise DocumentProcessingError(
+                "Only HTTP/HTTPS URLs are supported",
+                details={"url": url},
+            )
+
+        if not parsed.hostname:
+            raise DocumentProcessingError(
+                "URL must include a valid hostname",
+                details={"url": url},
+            )
+
+        hostname = parsed.hostname.lower()
+        blocked_hostnames = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
+        if hostname in blocked_hostnames or hostname.endswith(".local"):
+            raise DocumentProcessingError(
+                "Local or internal URLs are not allowed",
+                details={"url": normalized_url},
+            )
+
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise DocumentProcessingError(
+                "Unable to resolve URL hostname",
+                details={"url": normalized_url, "error": str(e)},
+            )
+
+        for info in addr_info:
+            ip_value = info[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_value)
+            except ValueError:
+                continue
+
+            if (
+                ip_obj.is_loopback
+                or ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                raise DocumentProcessingError(
+                    "URL resolves to a non-public address and cannot be ingested",
+                    details={"url": normalized_url, "ip": ip_value},
+                )
+
+        return normalized_url
+
+    def _build_filename_from_url(self, url: str, content_type: str) -> str:
+        """Infer a local filename from URL path and content type."""
+        parsed = urlparse(url)
+        raw_name = Path(unquote(parsed.path)).name
+        default_stem = f"webpage-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:10]}"
+        base_name = raw_name or default_stem
+
+        extension = Path(base_name).suffix.lower()
+        if extension in {".pdf", ".docx", ".doc", ".txt", ".html", ".htm"}:
+            return base_name
+
+        content_type_value = content_type.split(";")[0].strip().lower()
+        extension_map = {
+            "application/pdf": ".pdf",
+            "application/msword": ".doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "text/plain": ".txt",
+            "text/html": ".html",
+        }
+        inferred_extension = extension_map.get(content_type_value)
+        if inferred_extension:
+            if extension:
+                return f"{Path(base_name).stem}{inferred_extension}"
+            return f"{base_name}{inferred_extension}"
+
+        return base_name
+
+    def _is_html_content(self, filename: str, content_type: str) -> bool:
+        """Check if remote content should be parsed as HTML."""
+        extension = Path(filename).suffix.lower()
+        content_type_value = content_type.split(";")[0].strip().lower()
+        return extension in {".html", ".htm"} or content_type_value == "text/html"
+
+    def _is_supported_web_content(self, filename: str, content_type: str) -> bool:
+        """Validate downloadable content types accepted by ingestion pipeline."""
+        extension = Path(filename).suffix.lower()
+        content_type_value = content_type.split(";")[0].strip().lower()
+
+        supported_extensions = {".pdf", ".docx", ".doc", ".txt", ".html", ".htm"}
+        supported_types = {
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "text/plain",
+            "text/html",
+        }
+
+        return extension in supported_extensions or content_type_value in supported_types
+
+    def _extract_html_title(self, content: bytes) -> Optional[str]:
+        """Extract page title from HTML bytes."""
+        decoded = content.decode("utf-8", errors="ignore")
+        match = re.search(r"<title[^>]*>(.*?)</title>", decoded, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+
+        title = re.sub(r"\s+", " ", match.group(1)).strip()
+        return title[:120] if title else None
+
+    def _extract_text_from_html(self, content: bytes) -> str:
+        """Convert HTML bytes into readable text."""
+        decoded = content.decode("utf-8", errors="ignore")
+        parser = _HTMLTextExtractor()
+        parser.feed(decoded)
+        parser.close()
+        return parser.get_text()
     
     def _load_document(self, file_path: Path, metadata: Dict[str, Any]) -> List[LangChainDocument]:
         """Load document using appropriate loader."""
@@ -221,6 +394,96 @@ class DocumentProcessor:
                 f"Failed to process document: {str(e)}",
                 details={"filename": filename, "error": str(e)}
             )
+
+    async def process_url(
+        self,
+        url: str,
+        custom_metadata: Optional[Dict[str, Any]] = None,
+        verify_ssl: bool = True,
+    ) -> ProcessedDocument:
+        """Fetch content from a URL and process it into vector-ready chunks."""
+        safe_url = self._validate_source_url(url)
+        logger.info("processing_url_document", url=safe_url)
+
+        timeout = httpx.Timeout(timeout=25.0, connect=10.0, read=20.0)
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                max_redirects=5,
+                verify=verify_ssl,
+                headers={"User-Agent": "POWERGRID-RAG-Ingestor/1.0"},
+            ) as client:
+                response = await client.get(safe_url)
+        except httpx.HTTPError as e:
+            logger.error("url_fetch_failed", url=safe_url, error=str(e))
+            raise DocumentProcessingError(
+                "Failed to fetch content from URL",
+                details={"url": safe_url, "error": str(e)},
+            )
+
+        if response.status_code >= 400:
+            raise DocumentProcessingError(
+                f"URL returned HTTP {response.status_code}",
+                details={"url": safe_url, "status_code": response.status_code},
+            )
+
+        content = response.content
+        if not content:
+            raise DocumentProcessingError(
+                "URL returned empty content",
+                details={"url": safe_url},
+            )
+
+        max_size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if len(content) > max_size_bytes:
+            raise DocumentProcessingError(
+                f"URL content exceeds {settings.MAX_UPLOAD_SIZE_MB}MB limit",
+                details={"url": safe_url, "size": len(content)},
+            )
+
+        content_type = response.headers.get("content-type", "").lower()
+        filename = self._build_filename_from_url(safe_url, content_type)
+
+        if not self._is_supported_web_content(filename, content_type):
+            raise DocumentProcessingError(
+                "Unsupported URL content type. Supported: HTML, TXT, PDF, DOCX, DOC",
+                details={"url": safe_url, "content_type": content_type, "filename": filename},
+            )
+
+        metadata: Dict[str, Any] = {"source_url": safe_url}
+        if custom_metadata:
+            metadata.update(custom_metadata)
+
+        if self._is_html_content(filename, content_type):
+            extracted_text = self._extract_text_from_html(content)
+            if not extracted_text:
+                raise DocumentProcessingError(
+                    "The URL does not contain readable text content",
+                    details={"url": safe_url},
+                )
+
+            page_title = self._extract_html_title(content)
+            title_slug = ""
+            if page_title:
+                title_slug = re.sub(r"[^A-Za-z0-9]+", "-", page_title).strip("-").lower()
+
+            if not title_slug:
+                title_slug = Path(filename).stem or f"webpage-{hashlib.sha256(safe_url.encode('utf-8')).hexdigest()[:10]}"
+
+            filename = f"{title_slug[:80]}.txt"
+
+            header_lines = [f"Source URL: {safe_url}"]
+            if page_title:
+                header_lines.append(f"Page Title: {page_title}")
+            text_payload = "\n".join(header_lines) + "\n\n" + extracted_text
+            content = text_payload.encode("utf-8")
+
+            if "doc_type" not in metadata:
+                metadata["doc_type"] = "TEXT_DOCUMENT"
+
+        return await self.process_file(filename, content, metadata)
     
     async def process_multiple_files(
         self,

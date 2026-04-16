@@ -60,7 +60,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           citations: m.citations as Citation[] | undefined,
           confidence: m.confidence as number | undefined,
           modelUsed: m.model_used as string | undefined,
+          provider: m.provider as string | undefined,
           queryTimeMs: m.query_time_ms as number | undefined,
+          documentsRetrieved: m.documents_retrieved as number | undefined,
+          isInsufficient: m.is_insufficient as boolean | undefined,
         }))
         set({ messages: hydrated, isHydrated: true })
       } else {
@@ -130,7 +133,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         citations: response.citations,
         confidence: response.confidence,
         model_used: response.model_used,
+        provider: response.provider,
         query_time_ms: response.query_time_ms,
+        documents_retrieved: response.documents_retrieved,
+        is_insufficient: response.is_insufficient,
       }).catch(() => {})
 
     } catch (err: unknown) {

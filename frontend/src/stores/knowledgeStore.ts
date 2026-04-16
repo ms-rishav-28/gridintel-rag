@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import {
-  getHealth, getStats, listDocuments, uploadDocument, deleteDocument,
+  getHealth, getStats, listDocuments, uploadDocument, uploadDocumentFromUrl, deleteDocument,
   getUserSettings, saveUserSettings, getMetadataOptions, uploadMultipleDocuments,
   type HealthResponse, type DocumentListItem, type UserSettings, type MetadataOptionsResponse,
 } from '../lib/api'
@@ -43,6 +43,7 @@ interface KnowledgeState {
   fetchMetadataOptions: () => Promise<void>
   persistSettings: (settings: UserSettings) => Promise<boolean>
   uploadFile: (file: File, metadata?: { doc_type?: string; equipment_type?: string; voltage_level?: string }) => Promise<boolean>
+  uploadUrl: (url: string, metadata?: { doc_type?: string; equipment_type?: string; voltage_level?: string }) => Promise<boolean>
   uploadFiles: (files: File[]) => Promise<{ processed: number; failed: number }>
   removeDocument: (docId: string) => Promise<boolean>
 }
@@ -134,6 +135,26 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: { message?: string } } }; message?: string }
       const msg = error?.response?.data?.detail?.message || error?.message || 'Upload failed'
+      set({ isUploading: false, uploadError: msg })
+      return false
+    }
+  },
+
+  uploadUrl: async (url, metadata) => {
+    set({ isUploading: true, uploadError: null })
+    try {
+      await uploadDocumentFromUrl({
+        url,
+        doc_type: metadata?.doc_type,
+        equipment_type: metadata?.equipment_type,
+        voltage_level: metadata?.voltage_level,
+      })
+      set({ isUploading: false })
+      get().fetchDocuments()
+      return true
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: { message?: string } } }; message?: string }
+      const msg = error?.response?.data?.detail?.message || error?.message || 'URL ingestion failed'
       set({ isUploading: false, uploadError: msg })
       return false
     }

@@ -10,7 +10,10 @@ export const saveMessage = mutation({
     citations: v.optional(v.array(v.any())),
     confidence: v.optional(v.number()),
     model_used: v.optional(v.string()),
+    provider: v.optional(v.string()),
     query_time_ms: v.optional(v.number()),
+    documents_retrieved: v.optional(v.number()),
+    is_insufficient: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const timestamp = args.timestamp ?? new Date().toISOString();
@@ -23,7 +26,10 @@ export const saveMessage = mutation({
       citations: args.citations,
       confidence: args.confidence,
       model_used: args.model_used,
+      provider: args.provider,
       query_time_ms: args.query_time_ms,
+      documents_retrieved: args.documents_retrieved,
+      is_insufficient: args.is_insufficient,
     });
 
     const session = await ctx.db
@@ -75,7 +81,10 @@ export const getSession = query({
         citations: msg.citations ?? [],
         confidence: msg.confidence,
         model_used: msg.model_used,
+        provider: msg.provider,
         query_time_ms: msg.query_time_ms,
+        documents_retrieved: msg.documents_retrieved,
+        is_insufficient: msg.is_insufficient,
       })),
     };
   },
@@ -115,7 +124,10 @@ export const listRecentMessages = query({
         citations: msg.citations ?? [],
         confidence: msg.confidence,
         model_used: msg.model_used,
+        provider: msg.provider,
         query_time_ms: msg.query_time_ms,
+        documents_retrieved: msg.documents_retrieved,
+        is_insufficient: msg.is_insufficient,
       }));
   },
 });

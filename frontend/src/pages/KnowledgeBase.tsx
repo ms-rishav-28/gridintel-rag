@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from 'convex/react'
+import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
   getMetadataOptions,
   uploadDocument,
+  uploadDocumentFromUrl,
   uploadMultipleDocuments,
   type MetadataOptionsResponse,
 } from '../lib/api'
 import { convexApi, type ConvexDocument } from '../lib/convexApi'
 
 const KnowledgeBase = () => {
+  const navigate = useNavigate()
   const documents = useQuery(convexApi.documents.listActive, {}) ?? []
   const deleteDocument = useMutation(convexApi.documents.softDeleteDocument)
 
@@ -19,7 +22,10 @@ const KnowledgeBase = () => {
   const [uploadDocType, setUploadDocType] = useState('')
   const [uploadEquipmentType, setUploadEquipmentType] = useState('')
   const [uploadVoltageLevel, setUploadVoltageLevel] = useState('')
+  const [urlInput, setUrlInput] = useState('')
+  const [showMetadataGaps, setShowMetadataGaps] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
+  const [isUrlUploading, setIsUrlUploading] = useState(false)
   const [metadataOptions, setMetadataOptions] = useState<MetadataOptionsResponse | null>(null)
   const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
 
@@ -39,14 +45,16 @@ const KnowledgeBase = () => {
   }, [])
 
   const totalChunks = useMemo(() => documents.reduce((sum, doc) => sum + doc.chunks_count, 0), [documents])
+  const isIngesting = isUploading || isUrlUploading
 
   const filteredDocs = useMemo(() => {
     return documents.filter((doc) => {
       const matchesFilter = activeFilter === 'ALL' || doc.doc_type === activeFilter
       const matchesSearch = !searchQuery || doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
-      return matchesFilter && matchesSearch
+      const matchesMetadataGap = !showMetadataGaps || !doc.equipment_type || !doc.voltage_level
+      return matchesFilter && matchesSearch && matchesMetadataGap
     })
-  }, [documents, activeFilter, searchQuery])
+  }, [documents, activeFilter, searchQuery, showMetadataGaps])
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(e.target.files || [])
@@ -91,6 +99,46 @@ const KnowledgeBase = () => {
     }
   }
 
+  const handleUrlUpload = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+
+    const trimmed = urlInput.trim()
+    if (!trimmed) {
+      toast.error('Enter a URL to ingest.')
+      return
+    }
+
+    let normalizedUrl = trimmed
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = `https://${normalizedUrl}`
+    }
+
+    try {
+      // Validate URL shape before sending request.
+      new URL(normalizedUrl)
+    } catch {
+      toast.error('Enter a valid http/https URL.')
+      return
+    }
+
+    try {
+      setIsUrlUploading(true)
+      const result = await uploadDocumentFromUrl({
+        url: normalizedUrl,
+        doc_type: uploadDocType || undefined,
+        equipment_type: uploadEquipmentType || undefined,
+        voltage_level: uploadVoltageLevel || undefined,
+      })
+      toast.success(`"${result.filename}" ingested from URL.`)
+      setUrlInput('')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'URL ingestion failed'
+      toast.error(message)
+    } finally {
+      setIsUrlUploading(false)
+    }
+  }
+
   const docTypeLabel = (type: string) => {
     const map: Record<string, string> = {
       CEA_GUIDELINE: 'CEA Guideline',
@@ -99,6 +147,14 @@ const KnowledgeBase = () => {
       TEXT_DOCUMENT: 'Text Document',
     }
     return map[type] || type
+  }
+
+  const handleVisualizeMap = () => {
+    sessionStorage.setItem(
+      'powergrid_chat_prefill',
+      'Summarize indexed documents and identify metadata gaps by document category.',
+    )
+    navigate('/chat')
   }
 
   return (
@@ -128,11 +184,11 @@ const KnowledgeBase = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isIngesting}
             className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-bold text-on-primary transition-all hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <span className="material-symbols-outlined text-sm">{isUploading ? 'hourglass_top' : 'upload_file'}</span>
-            {isUploading ? 'Ingesting...' : 'Upload Documents'}
+            <span className="material-symbols-outlined text-sm">{isIngesting ? 'hourglass_top' : 'upload_file'}</span>
+            {isUploading ? 'Ingesting Files...' : isUrlUploading ? 'URL Ingesting...' : 'Upload Documents'}
           </button>
           <span className="rounded-sm bg-secondary-container px-3 py-1 font-label text-xs font-bold text-on-secondary-container">
             Convex Live
@@ -142,7 +198,7 @@ const KnowledgeBase = () => {
 
       <section className="rounded-xl bg-surface-container p-4">
         <h2 className="mb-3 font-label text-xs font-bold uppercase tracking-widest text-on-surface-variant">
-          Upload Metadata (optional, single-file mode)
+          Upload Metadata (optional, applies to single-file and URL ingestion)
         </h2>
         <div className="grid gap-3 md:grid-cols-4">
           <select
@@ -189,12 +245,41 @@ const KnowledgeBase = () => {
 
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isIngesting}
             className="rounded-lg bg-surface-container-lowest px-4 py-2 text-sm font-semibold text-primary transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Select Files
           </button>
         </div>
+
+        <form onSubmit={handleUrlUpload} className="mt-4 grid gap-3 md:grid-cols-12">
+          <div className="md:col-span-9">
+            <label className="mb-1 block font-label text-[11px] font-bold uppercase tracking-wider text-on-surface-variant">
+              Ingest Webpage URL
+            </label>
+            <input
+              type="url"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              placeholder="https://example.com/manual"
+              className="w-full rounded-lg border border-outline-variant bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
+              disabled={isIngesting}
+            />
+            <p className="mt-1 text-xs text-on-surface-variant">
+              Public HTTP/HTTPS URLs only. HTML, TXT, PDF, DOCX, and DOC content is supported.
+            </p>
+          </div>
+
+          <div className="md:col-span-3 md:flex md:items-end">
+            <button
+              type="submit"
+              disabled={isIngesting || !urlInput.trim()}
+              className="w-full rounded-lg bg-primary px-4 py-2 text-sm font-bold text-on-primary transition-colors hover:bg-primary-container disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isUrlUploading ? 'Ingesting URL...' : 'Ingest URL'}
+            </button>
+          </div>
+        </form>
       </section>
 
       <div className="flex flex-wrap items-center gap-4 rounded-xl bg-surface-container p-4">
@@ -236,9 +321,14 @@ const KnowledgeBase = () => {
           </p>
           <button
             onClick={() => fileInputRef.current?.click()}
+            disabled={isIngesting}
             className="w-full rounded-lg bg-on-primary py-2 text-sm font-bold text-primary transition-colors hover:bg-primary-container hover:text-on-primary"
           >
-            {documents.length > 0 ? 'Add More Documents' : 'Upload First Document'}
+            {isIngesting
+              ? 'Ingestion In Progress...'
+              : documents.length > 0
+                ? 'Add More Documents'
+                : 'Upload First Document'}
           </button>
         </div>
 
@@ -268,8 +358,22 @@ const KnowledgeBase = () => {
                 Convex-backed metadata streams keep your document state live while Python handles ingestion and vector indexing.
               </p>
               <div className="mt-5 flex flex-wrap gap-3">
-                <button className="rounded-lg bg-primary px-6 py-2 text-sm font-bold text-on-primary">Visualize Map</button>
-                <button className="rounded-lg bg-surface-container-lowest px-6 py-2 text-sm font-bold text-primary">Review Conflicts</button>
+                <button
+                  onClick={handleVisualizeMap}
+                  className="rounded-lg bg-primary px-6 py-2 text-sm font-bold text-on-primary"
+                >
+                  Visualize Map
+                </button>
+                <button
+                  onClick={() => setShowMetadataGaps((prev) => !prev)}
+                  className={`rounded-lg px-6 py-2 text-sm font-bold transition-colors ${
+                    showMetadataGaps
+                      ? 'bg-primary text-on-primary'
+                      : 'bg-surface-container-lowest text-primary'
+                  }`}
+                >
+                  {showMetadataGaps ? 'Reviewing Conflicts' : 'Review Conflicts'}
+                </button>
               </div>
             </div>
             <div className="relative aspect-video w-full overflow-hidden rounded-lg border-2 border-primary/10 bg-surface-container-highest md:w-1/3">

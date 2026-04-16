@@ -95,6 +95,12 @@ Set these in **Variables** tab:
 | `SECRET_KEY` | Random 64-char string | ✅ |
 | `CONVEX_ADMIN_KEY` | Convex admin key (optional, recommended for server mutations) | ❌ |
 | `BACKEND_API_KEY` | Strong random API key for frontend-backend auth | Recommended |
+| `MAX_REQUEST_BODY_MB` | Global request body guardrail (default `55`) | Recommended |
+| `TRUST_PROXY_HEADERS` | Trust forwarded IP headers (`true` only behind trusted proxy) | Recommended |
+| `TRUSTED_PROXY_IPS` | Comma-separated trusted proxy IP/CIDR allow-list | Optional |
+| `ENABLE_SECURITY_HEADERS` | Enable response hardening headers | Recommended |
+| `ENABLE_HSTS` | Add HSTS on HTTPS responses | Recommended |
+| `HSTS_MAX_AGE_SECONDS` | HSTS max-age value in seconds | Optional |
 | `ENABLE_RATE_LIMITING` | `true` | Recommended |
 | `RATE_LIMIT_REQUESTS` | `100` | Recommended |
 | `RATE_LIMIT_WINDOW` | `3600` | Recommended |
@@ -103,6 +109,12 @@ Set these in **Variables** tab:
 | `LOG_LEVEL` | `INFO` | ❌ |
 
 If `BACKEND_API_KEY` is configured, all non-exempt API routes require the `X-API-Key` request header.
+
+### Backend Security Hardening Notes
+- API key checks now use constant-time comparison.
+- Request body size is rejected early via middleware when `Content-Length` exceeds `MAX_REQUEST_BODY_MB`.
+- Forwarded client IP headers are ignored unless `TRUST_PROXY_HEADERS=true`.
+- Response headers include `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, plus optional CSP/Permissions/HSTS controls.
 
 ### Verify Deployment
 ```bash
@@ -168,6 +180,48 @@ npm run dev
 ```
 
 > The frontend `.env` is pre-configured to point to `localhost:8000`.
+
+---
+
+## 4.1 Source Catalog and Bulk Ingestion
+
+The repository now includes a curated ingestion catalog based on official POWERGRID, regulatory, grid operations, web, and encyclopedia sources:
+
+- Catalog file: `backend/ingestion/source_catalog.json`
+- Runner script: `backend/scripts/ingest_source_catalog.py`
+
+### What the runner can automate right now
+- `pdf_catalog`: crawls listing pages for PDF links and ingests discovered PDF URLs
+- `webpage`: ingests live page text via URL
+- `wikipedia`: ingests article pages via URL
+
+Other source types (for example `tabular`, `youtube`, `standards_summary`) are recorded in the catalog and reported as skipped until a dedicated loader is wired.
+
+### Dry-run (recommended first)
+```bash
+# From repository root
+python backend/scripts/ingest_source_catalog.py --dry-run --max-urls-per-source 3
+```
+
+### Ingest selected categories
+```bash
+python backend/scripts/ingest_source_catalog.py --categories official_powergrid regulatory --max-urls-per-source 5
+```
+
+If some external sites fail due certificate-chain issues on your machine, you can retry in ingestion-script mode with:
+
+```bash
+python backend/scripts/ingest_source_catalog.py --categories regulatory --allow-insecure-tls
+```
+
+Use this option only for controlled ingestion runs.
+
+### Ingest specific source IDs
+```bash
+python backend/scripts/ingest_source_catalog.py --source-ids pgcil_annual_reports cea_technical_standards posoco_daily_reports
+```
+
+Each run writes a JSON report to `data/ingestion_reports/` (git-ignored) with attempted URLs, successes, failures, duplicates, and skipped source types.
 
 ---
 
@@ -239,6 +293,7 @@ When `BACKEND_API_KEY` is set, include `X-API-Key: <your-key>` in client request
 |---|---|---|
 | `POST` | `/api/v1/query` | RAG query with citations |
 | `POST` | `/api/v1/documents/upload` | Upload & ingest a document |
+| `POST` | `/api/v1/documents/upload-url` | Ingest a public URL (HTML/TXT/PDF/DOCX/DOC) |
 | `POST` | `/api/v1/documents/batch-upload` | Batch upload |
 | `GET` | `/api/v1/documents/list` | List all ingested documents |
 | `DELETE` | `/api/v1/documents/{doc_id}` | Delete a document |
@@ -312,6 +367,10 @@ curl -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/health
 ### Document upload fails
 - Check file type is `.pdf`, `.docx`, `.doc`, or `.txt`
 - Max file size is 50MB (configurable via `MAX_UPLOAD_SIZE_MB`)
+
+### URL ingestion fails
+- Use a public `http://` or `https://` URL (localhost/private network targets are blocked)
+- Supported content types: HTML, plain text, PDF, DOCX, DOC
 
 ### Python dependency resolution fails during setup
 - Upgrade pip tooling first: `python -m pip install --upgrade pip setuptools wheel`
