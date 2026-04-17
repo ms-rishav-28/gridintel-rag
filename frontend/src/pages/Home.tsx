@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from 'convex/react'
-import { getHealth, type HealthResponse } from '../lib/api'
-import { convexApi } from '../lib/convexApi'
+import {
+  getHealth,
+  getChatHistory,
+  listChatSessions,
+  listDocuments,
+  type HealthResponse,
+  type ChatMessagePayload,
+  type DocumentListItem,
+} from '../lib/api'
+
+type RecentActivityMessage = ChatMessagePayload & {
+  id: string
+}
 
 const Home = () => {
   const navigate = useNavigate()
 
-  const documents = useQuery(convexApi.documents.listActive, {}) ?? []
-  const recentMessages = useQuery(convexApi.chat.listRecentMessages, { limit: 12 }) ?? []
+  const [documents, setDocuments] = useState<DocumentListItem[]>([])
+  const [recentMessages, setRecentMessages] = useState<RecentActivityMessage[]>([])
 
   const [health, setHealth] = useState<HealthResponse | null>(null)
 
@@ -23,6 +33,52 @@ const Home = () => {
 
     void loadHealth()
 
+    const loadActivity = async () => {
+      try {
+        const [docsResponse, sessionsResponse] = await Promise.all([
+          listDocuments(),
+          listChatSessions(),
+        ])
+
+        setDocuments(docsResponse.documents)
+
+        const sessionIds = sessionsResponse.sessions.slice(0, 8).map((session) => session.session_id)
+        const historyResults = await Promise.all(
+          sessionIds.map(async (sessionId) => {
+            try {
+              return await getChatHistory(sessionId)
+            } catch {
+              return null
+            }
+          }),
+        )
+
+        const latestMessages = historyResults
+          .flatMap((session) => {
+            if (!session || !session.messages || session.messages.length === 0) return []
+            const lastMessage = session.messages[session.messages.length - 1]
+            return [
+              {
+                id: `${session.session_id}_${lastMessage.timestamp || Date.now()}`,
+                ...lastMessage,
+              } as RecentActivityMessage,
+            ]
+          })
+          .sort((a, b) => {
+            const aTime = a.timestamp ? Date.parse(a.timestamp) : 0
+            const bTime = b.timestamp ? Date.parse(b.timestamp) : 0
+            return bTime - aTime
+          })
+
+        setRecentMessages(latestMessages.slice(0, 12))
+      } catch {
+        setDocuments([])
+        setRecentMessages([])
+      }
+    }
+
+    void loadActivity()
+
     const interval = setInterval(() => {
       void loadHealth()
     }, 30000)
@@ -36,8 +92,8 @@ const Home = () => {
   const formattedMessages = useMemo(
     () =>
       recentMessages.map((msg, index) => ({
-        id: `${msg.session_id || 'session'}_${msg.timestamp || 'time'}_${index}`,
         ...msg,
+        id: `${msg.id}_${index}`,
       })),
     [recentMessages],
   )

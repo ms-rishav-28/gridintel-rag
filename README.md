@@ -10,7 +10,7 @@
 ![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-F97316)
 
 > **Production-grade RAG system** for POWERGRID operations knowledge management.  
-> Frontend → **Vercel** | Backend → **Railway** | Realtime DB → **Convex**
+> Frontend → **Vercel** | Backend → **Railway** | Optional persistence → **Convex**
 
 ---
 
@@ -39,14 +39,17 @@
 
 - **Node.js** ≥ 18
 - **Python** ≥ 3.10
-- **Convex Project**
 - **Google Gemini API Key** (or Groq)
 - **Railway Account** (free tier works, Starter recommended)
 - **Vercel Account** (free tier)
 
 ---
 
-## 1. Convex Setup
+## 1. Optional Convex Setup
+
+Convex is optional. The frontend now works directly with Railway APIs, and backend storage gracefully falls back to in-memory mode when Convex is not configured.
+
+Use Convex only if you want durable chat/settings/document metadata across backend restarts.
 
 ### Create Convex Project
 1. Go to [Convex Dashboard](https://dashboard.convex.dev/)
@@ -88,7 +91,7 @@ Set these in **Variables** tab:
 | Variable | Value | Required |
 |---|---|---|
 | `GOOGLE_API_KEY` | Your Gemini API key | ✅ |
-| `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | ✅ |
+| `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | ❌ |
 | `FRONTEND_URL` | `https://your-app.vercel.app` | ✅ |
 | `DEFAULT_LLM_PROVIDER` | `gemini` | ✅ |
 | `DEFAULT_LLM_MODEL` | `gemini-1.5-flash` | ✅ |
@@ -140,8 +143,9 @@ curl https://your-railway-url.up.railway.app/api/v1/health
 | Variable | Value |
 |---|---|
 | `VITE_API_URL` | `https://your-railway-url.up.railway.app/api/v1` |
-| `VITE_CONVEX_URL` | `https://your-project.convex.cloud` |
 | `VITE_BACKEND_API_KEY` | Same value as Railway `BACKEND_API_KEY` |
+
+`VITE_CONVEX_URL` is optional and only needed if you are running the legacy direct-Convex frontend mode.
 
 ### Verify
 Visit your Vercel URL → you should see the GridIntel dashboard.

@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery } from 'convex/react'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
+  deleteDocument,
   getMetadataOptions,
+  listDocuments,
   uploadDocument,
   uploadDocumentFromUrl,
   uploadMultipleDocuments,
+  type DocumentListItem,
   type MetadataOptionsResponse,
 } from '../lib/api'
-import { convexApi, type ConvexDocument } from '../lib/convexApi'
+
+type ConvexDocument = DocumentListItem
 
 const KnowledgeBase = () => {
   const navigate = useNavigate()
-  const documents = useQuery(convexApi.documents.listActive, {}) ?? []
-  const deleteDocument = useMutation(convexApi.documents.softDeleteDocument)
+  const [documents, setDocuments] = useState<ConvexDocument[]>([])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [activeFilter, setActiveFilter] = useState<string>('ALL')
@@ -29,6 +31,15 @@ const KnowledgeBase = () => {
   const [metadataOptions, setMetadataOptions] = useState<MetadataOptionsResponse | null>(null)
   const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
 
+  const refreshDocuments = async () => {
+    try {
+      const response = await listDocuments()
+      setDocuments(response.documents)
+    } catch {
+      setDocuments([])
+    }
+  }
+
   useEffect(() => {
     const loadMetadata = async () => {
       try {
@@ -41,7 +52,7 @@ const KnowledgeBase = () => {
         setIsLoadingMetadata(false)
       }
     }
-    void loadMetadata()
+    void Promise.all([loadMetadata(), refreshDocuments()])
   }, [])
 
   const totalChunks = useMemo(() => documents.reduce((sum, doc) => sum + doc.chunks_count, 0), [documents])
@@ -79,6 +90,8 @@ const KnowledgeBase = () => {
         const result = await uploadMultipleDocuments(selectedFiles)
         toast.success(`Batch upload complete: ${result.processed} processed, ${result.failed} failed.`)
       }
+
+      await refreshDocuments()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Upload failed'
       toast.error(message)
@@ -92,8 +105,9 @@ const KnowledgeBase = () => {
     if (!window.confirm(`Remove "${doc.filename}" from the knowledge base?`)) return
 
     try {
-      await deleteDocument({ doc_id: doc.doc_id })
+      await deleteDocument(doc.doc_id)
       toast.success(`"${doc.filename}" removed.`)
+      await refreshDocuments()
     } catch {
       toast.error('Failed to remove document.')
     }
@@ -131,6 +145,7 @@ const KnowledgeBase = () => {
       })
       toast.success(`"${result.filename}" ingested from URL.`)
       setUrlInput('')
+      await refreshDocuments()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'URL ingestion failed'
       toast.error(message)
@@ -191,7 +206,7 @@ const KnowledgeBase = () => {
             {isUploading ? 'Ingesting Files...' : isUrlUploading ? 'URL Ingesting...' : 'Upload Documents'}
           </button>
           <span className="rounded-sm bg-secondary-container px-3 py-1 font-label text-xs font-bold text-on-secondary-container">
-            Convex Live
+            Backend Mode
           </span>
         </div>
       </section>
@@ -355,7 +370,7 @@ const KnowledgeBase = () => {
             <div className="flex-1">
               <h4 className="font-headline text-xl font-bold">Semantic Discovery</h4>
               <p className="mt-2 text-sm text-on-surface-variant">
-                Convex-backed metadata streams keep your document state live while Python handles ingestion and vector indexing.
+                Metadata and chat state are served from backend persistence while Python handles ingestion and vector indexing.
               </p>
               <div className="mt-5 flex flex-wrap gap-3">
                 <button

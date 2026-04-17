@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery } from 'convex/react'
 import { useNavigate } from 'react-router-dom'
 import {
   getMetadataOptions,
+  getChatHistory,
   queryDocuments,
+  saveChatMessage,
   type Citation,
   type MetadataOptionsResponse,
 } from '../lib/api'
-import { convexApi, type ConvexChatMessage } from '../lib/convexApi'
 import { formatConfidence, formatDuration } from '../lib/utils'
 
 interface ChatMessage {
@@ -57,26 +57,7 @@ const Chat = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-
-  const saveMessage = useMutation(convexApi.chat.saveMessage)
-  const session = useQuery(convexApi.chat.getSession, { session_id: sessionId })
-
-  const messages: ChatMessage[] = useMemo(() => {
-    const source = session?.messages ?? []
-    return source.map((message: ConvexChatMessage, index) => ({
-      id: `${message.timestamp || 'ts'}_${index}`,
-      role: message.role,
-      content: message.content,
-      timestamp: new Date(message.timestamp || Date.now()),
-      citations: (message.citations as Citation[] | undefined) ?? [],
-      confidence: message.confidence,
-      modelUsed: message.model_used,
-      provider: message.provider,
-      queryTimeMs: message.query_time_ms,
-      documentsRetrieved: message.documents_retrieved,
-      isInsufficient: message.is_insufficient,
-    }))
-  }, [session?.messages])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
 
   useEffect(() => {
     const prefill = sessionStorage.getItem(CHAT_PREFILL_KEY)
@@ -100,6 +81,43 @@ const Chat = () => {
     }
     loadMetadata()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadChatHistory = async () => {
+      try {
+        const session = await getChatHistory(sessionId)
+        if (cancelled) return
+
+        const history = (session?.messages ?? []).map((message, index) => ({
+          id: `${message.timestamp || 'ts'}_${index}`,
+          role: message.role as 'user' | 'assistant',
+          content: message.content,
+          timestamp: new Date(message.timestamp || Date.now()),
+          citations: (message.citations as Citation[] | undefined) ?? [],
+          confidence: message.confidence,
+          modelUsed: message.model_used,
+          provider: message.provider,
+          queryTimeMs: message.query_time_ms,
+          documentsRetrieved: message.documents_retrieved,
+          isInsufficient: message.is_insufficient,
+        }))
+
+        setMessages(history)
+      } catch {
+        if (!cancelled) {
+          setMessages([])
+        }
+      }
+    }
+
+    void loadChatHistory()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -127,15 +145,23 @@ const Chat = () => {
     if (!question || isLoading) return
 
     const timestamp = new Date().toISOString()
+    const userMessage: ChatMessage = {
+      id: `${timestamp}_user`,
+      role: 'user',
+      content: question,
+      timestamp: new Date(timestamp),
+    }
+
+    setMessages((prev) => [...prev, userMessage])
     setInputValue('')
     setIsLoading(true)
 
-    await saveMessage({
+    await saveChatMessage({
       session_id: sessionId,
       role: 'user',
       content: question,
       timestamp,
-    })
+    }).catch(() => {})
 
     try {
       const response = await queryDocuments({
@@ -146,7 +172,22 @@ const Chat = () => {
         use_fallback: useFallback,
       })
 
-      await saveMessage({
+      const assistantMessage: ChatMessage = {
+        id: `${Date.now()}_assistant`,
+        role: 'assistant',
+        content: response.answer,
+        timestamp: new Date(),
+        citations: response.citations,
+        confidence: response.confidence,
+        modelUsed: response.model_used,
+        provider: response.provider,
+        queryTimeMs: response.query_time_ms,
+        documentsRetrieved: response.documents_retrieved,
+        isInsufficient: response.is_insufficient,
+      }
+      setMessages((prev) => [...prev, assistantMessage])
+
+      await saveChatMessage({
         session_id: sessionId,
         role: 'assistant',
         content: response.answer,
@@ -158,15 +199,24 @@ const Chat = () => {
         query_time_ms: response.query_time_ms,
         documents_retrieved: response.documents_retrieved,
         is_insufficient: response.is_insufficient,
-      })
+      }).catch(() => {})
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to get response from backend.'
-      await saveMessage({
+      const assistantErrorMessage: ChatMessage = {
+        id: `${Date.now()}_assistant_error`,
+        role: 'assistant',
+        content: `⚠️ Error: ${message}`,
+        timestamp: new Date(),
+        isInsufficient: true,
+      }
+      setMessages((prev) => [...prev, assistantErrorMessage])
+
+      await saveChatMessage({
         session_id: sessionId,
         role: 'assistant',
         content: `⚠️ Error: ${message}`,
         timestamp: new Date().toISOString(),
-      })
+      }).catch(() => {})
     } finally {
       setIsLoading(false)
       inputRef.current?.focus()
@@ -181,7 +231,9 @@ const Chat = () => {
   }
 
   const handleClearSession = () => {
-    setSessionId(createNewSessionId())
+    const nextSessionId = createNewSessionId()
+    setSessionId(nextSessionId)
+    setMessages([])
   }
 
   return (

@@ -1,9 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery } from 'convex/react'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { getHealth, getStats, type HealthResponse } from '../lib/api'
-import { convexApi } from '../lib/convexApi'
+import {
+  getHealth,
+  getStats,
+  getUserSettings,
+  saveUserSettings,
+  type HealthResponse,
+  type UserSettings,
+} from '../lib/api'
 
 interface StatsData {
   vector_store: {
@@ -22,8 +27,7 @@ interface StatsData {
 
 const Settings = () => {
   const navigate = useNavigate()
-  const settingsData = useQuery(convexApi.settings.getSettings, {})
-  const saveSettings = useMutation(convexApi.settings.upsertSettings)
+  const [settingsData, setSettingsData] = useState<UserSettings | null>(null)
 
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [stats, setStats] = useState<StatsData | null>(null)
@@ -67,6 +71,19 @@ const Settings = () => {
   }, [])
 
   useEffect(() => {
+    const loadSettings = async () => {
+      try {
+        const nextSettings = await getUserSettings()
+        setSettingsData(nextSettings)
+      } catch {
+        setSettingsData(null)
+      }
+    }
+
+    void loadSettings()
+  }, [])
+
+  useEffect(() => {
     if (!settingsData) return
 
     const nextTheme = settingsData.theme === 'dark' ? 'dark' : 'light'
@@ -99,11 +116,14 @@ const Settings = () => {
     try {
       setIsSavingSettings(true)
       setSettingsError(null)
-      await saveSettings({
+      const payload: UserSettings = {
         theme,
         notifications,
         profile,
-      })
+      }
+
+      await saveUserSettings(payload)
+      setSettingsData(payload)
       toast.success('Settings saved successfully.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save settings.'
@@ -314,7 +334,7 @@ const Settings = () => {
               <ActionCard
                 icon="history"
                 title="Analysis Audit Log"
-                subtitle="All persisted chat sessions are available in Convex"
+                subtitle="All persisted chat sessions are available from backend storage"
                 onClick={() => navigate('/chat')}
               />
             </div>
