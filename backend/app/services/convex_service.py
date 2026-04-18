@@ -3,10 +3,15 @@
 Provides durable storage for document metadata, chat sessions, and settings.
 Gracefully degrades to in-memory mode if Convex is not configured,
 allowing local development without a Convex deployment.
+
+All public methods are ``async`` and offload blocking Convex HTTP calls
+to a thread pool so the event loop is never starved (audit fix #4).
 """
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +28,8 @@ _mem_settings: Dict[str, Any] = {
     "theme": "light",
     "notifications": {"critical": True, "insights": True},
 }
+
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="convex")
 
 
 def _now_iso() -> str:
@@ -47,7 +54,11 @@ def _get_convex_client():
 
 
 class ConvexService:
-    """Persistent storage backed by Convex with in-memory fallback."""
+    """Persistent storage backed by Convex with in-memory fallback.
+
+    All public methods are async. Sync Convex SDK calls are offloaded to
+    a thread pool via ``run_in_executor`` (audit fix #4).
+    """
 
     def __init__(self):
         self._client = _get_convex_client()
@@ -76,10 +87,9 @@ class ConvexService:
             raise RuntimeError("Convex client unavailable")
         return self._client.mutation(name, args or {})
 
-    # ─── Document Metadata ───────────────────────────────────────
+    # ─── Document Metadata (sync internals) ──────────────────────
 
-    def save_document_metadata(self, doc_id: str, metadata: Dict[str, Any]) -> None:
-        """Persist document metadata after successful vector ingestion."""
+    def _save_document_metadata_sync(self, doc_id: str, metadata: Dict[str, Any]) -> None:
         record = {
             "doc_id": doc_id,
             "filename": metadata.get("source", metadata.get("filename", "Unknown")),
@@ -103,8 +113,7 @@ class ConvexService:
             logger.warning("convex_document_save_failed_fallback", error=str(e), doc_id=doc_id)
             _mem_documents[doc_id] = record
 
-    def list_documents(self) -> List[Dict[str, Any]]:
-        """Return all active documents."""
+    def _list_documents_sync(self) -> List[Dict[str, Any]]:
         try:
             if self._client:
                 documents = self._query("documents:listActive")
@@ -116,8 +125,7 @@ class ConvexService:
             logger.warning("convex_documents_list_failed_fallback", error=str(e))
             return [d for d in _mem_documents.values() if d.get("status") == "active"]
 
-    def delete_document_metadata(self, doc_id: str) -> None:
-        """Soft-delete a document by marking status."""
+    def _delete_document_metadata_sync(self, doc_id: str) -> None:
         try:
             if self._client:
                 self._mutation("documents:softDeleteDocument", {"doc_id": doc_id})
@@ -128,10 +136,9 @@ class ConvexService:
             if doc_id in _mem_documents:
                 _mem_documents[doc_id]["status"] = "deleted"
 
-    # ─── Chat Sessions ───────────────────────────────────────────
+    # ─── Chat Sessions (sync internals) ──────────────────────────
 
-    def save_chat_message(self, session_id: str, message: Dict[str, Any]) -> None:
-        """Append a message to a chat session."""
+    def _save_chat_message_sync(self, session_id: str, message: Dict[str, Any]) -> None:
         msg = {
             "role": message.get("role", "user"),
             "content": message.get("content", ""),
@@ -175,8 +182,7 @@ class ConvexService:
             _mem_chats[session_id]["messages"].append(msg)
             _mem_chats[session_id]["updated_at"] = _now_iso()
 
-    def get_chat_history(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve full chat session."""
+    def _get_chat_history_sync(self, session_id: str) -> Optional[Dict[str, Any]]:
         try:
             if self._client:
                 session = self._query("chat:getSession", {"session_id": session_id})
@@ -188,8 +194,7 @@ class ConvexService:
             logger.warning("convex_chat_history_failed_fallback", error=str(e), session_id=session_id)
             return _mem_chats.get(session_id)
 
-    def list_chat_sessions(self) -> List[Dict[str, Any]]:
-        """List all chat sessions (metadata only, no messages)."""
+    def _list_chat_sessions_sync(self) -> List[Dict[str, Any]]:
         try:
             if self._client:
                 sessions = self._query("chat:listSessions")
@@ -217,10 +222,9 @@ class ConvexService:
                 for v in _mem_chats.values()
             ]
 
-    # ─── User Settings ───────────────────────────────────────────
+    # ─── User Settings (sync internals) ──────────────────────────
 
-    def save_settings(self, user_settings: Dict[str, Any]) -> None:
-        """Persist user/app settings."""
+    def _save_settings_sync(self, user_settings: Dict[str, Any]) -> None:
         try:
             if self._client:
                 self._mutation("settings:upsertSettings", user_settings)
@@ -230,8 +234,7 @@ class ConvexService:
             logger.warning("convex_settings_save_failed_fallback", error=str(e))
             _mem_settings.update(user_settings)
 
-    def get_settings(self) -> Dict[str, Any]:
-        """Retrieve user/app settings."""
+    def _get_settings_sync(self) -> Dict[str, Any]:
         default_settings = {
             "theme": "light",
             "notifications": {"critical": True, "insights": True},
@@ -246,6 +249,48 @@ class ConvexService:
         except Exception as e:
             logger.warning("convex_settings_get_failed_fallback", error=str(e))
             return _mem_settings.copy()
+
+    # ─── Async public API (audit fix #4) ─────────────────────────
+
+    async def save_document_metadata(self, doc_id: str, metadata: Dict[str, Any]) -> None:
+        """Persist document metadata after successful vector ingestion."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, self._save_document_metadata_sync, doc_id, metadata)
+
+    async def list_documents(self) -> List[Dict[str, Any]]:
+        """Return all active documents."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self._list_documents_sync)
+
+    async def delete_document_metadata(self, doc_id: str) -> None:
+        """Soft-delete a document by marking status."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, self._delete_document_metadata_sync, doc_id)
+
+    async def save_chat_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """Append a message to a chat session."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, self._save_chat_message_sync, session_id, message)
+
+    async def get_chat_history(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve full chat session."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self._get_chat_history_sync, session_id)
+
+    async def list_chat_sessions(self) -> List[Dict[str, Any]]:
+        """List all chat sessions (metadata only, no messages)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self._list_chat_sessions_sync)
+
+    async def save_settings(self, user_settings: Dict[str, Any]) -> None:
+        """Persist user/app settings."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_executor, self._save_settings_sync, user_settings)
+
+    async def get_settings(self) -> Dict[str, Any]:
+        """Retrieve user/app settings."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self._get_settings_sync)
 
 
 # Singleton — safe to import because it gracefully degrades

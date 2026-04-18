@@ -100,7 +100,7 @@ export interface HealthResponse {
   }
   llm_provider: string
   llm_model: string
-  convex_connected: boolean
+  persistence_connected: boolean
 }
 
 export interface DocumentListItem {

@@ -125,7 +125,7 @@ class HealthResponse(BaseModel):
     vector_store: Dict[str, Any] = Field(..., description="Vector store statistics")
     llm_provider: str = Field(..., description="Active LLM provider")
     llm_model: str = Field(..., description="Active LLM model")
-    convex_connected: bool = Field(False, description="Whether Convex is connected")
+    persistence_connected: bool = Field(False, description="Whether persistence backend is connected")
 
 
 class ErrorResponse(BaseModel):

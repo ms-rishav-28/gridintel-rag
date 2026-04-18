@@ -189,13 +189,13 @@ const Settings = () => {
               </span>
             </div>
 
-            {health?.convex_connected && (
+            {health?.persistence_connected && (
               <div className="flex items-center gap-2 rounded-sm border border-primary/20 bg-primary-container px-3 py-1">
                 <span className="material-symbols-outlined text-sm text-on-primary-container" style={{ fontVariationSettings: "'FILL' 1" }}>
                   cloud_done
                 </span>
                 <span className="font-label text-[10px] font-bold uppercase tracking-widest text-on-primary-container">
-                  Convex Active
+                  Persistence Active
                 </span>
               </div>
             )}

@@ -1,3 +1,4 @@
+import sys
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from typing import Optional, List
@@ -8,7 +9,7 @@ class Settings(BaseSettings):
 
     # Application
     APP_NAME: str = "POWERGRID Operations Knowledge Assistant"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
 
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
 
     # Default LLM Configuration
     DEFAULT_LLM_PROVIDER: str = "gemini"
-    DEFAULT_LLM_MODEL: str = "gemini-1.5-flash"
+    DEFAULT_LLM_MODEL: str = "gemini-2.0-flash"
 
     # Embedding Model
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -40,25 +41,30 @@ class Settings(BaseSettings):
     CHROMA_PERSIST_DIRECTORY: str = "./data/chroma_db"
     CHROMA_COLLECTION_NAME: str = "powergrid_docs"
     VECTOR_SEARCH_K: int = 5
-    VECTOR_SEARCH_SCORE_THRESHOLD: float = 0.7
+    # MiniLM-384 cosine similarity produces 0.2–0.6 for genuinely relevant
+    # results. A threshold of 0.7 was killing almost every real match.
+    VECTOR_SEARCH_SCORE_THRESHOLD: float = 0.3
 
     # Document Processing
     UPLOAD_DIR: str = "./data/uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
     SUPPORTED_DOC_TYPES: List[str] = ["pdf", "docx", "doc", "txt"]
 
-    # Chunking Strategy
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    # Chunking Strategy — aligned with MiniLM 512-token limit.
+    # At ~0.9 tokens/char 450 chars ≈ 405 tokens, safely under the 512 cap.
+    CHUNK_SIZE: int = 450
+    CHUNK_OVERLAP: int = 50
 
     # RAG Configuration
     RAG_TEMPERATURE: float = 0.1
     RAG_MAX_TOKENS: int = 2048
     RAG_TOP_P: float = 0.95
+    # Maximum tokens of context to feed the LLM prompt.
+    MAX_CONTEXT_TOKENS: int = 4000
 
     # Citation Settings
     CITATION_ENABLED: bool = True
-    MIN_CITATION_SCORE: float = 0.6
+    MIN_CITATION_SCORE: float = 0.3
     MAX_CITATIONS: int = 3
 
     # Rate Limiting
@@ -98,5 +104,19 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get cached settings instance.
+
+    Performs startup validation:
+    - In production, SECRET_KEY must be explicitly set.
+    """
+    settings = Settings()
+
+    if settings.ENVIRONMENT == "production" and not settings.SECRET_KEY:
+        print(
+            "FATAL: SECRET_KEY is not set. "
+            "Set the SECRET_KEY environment variable before starting in production.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return settings

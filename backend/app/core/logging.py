@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 import logging
 import sys
@@ -98,5 +99,6 @@ def log_execution_time(logger: structlog.stdlib.BoundLogger, operation: str):
                 )
                 raise
         
-        return async_wrapper if hasattr(func, "__wrapped__") or "__code__" in dir(func) and func.__code__.co_flags & 0x80 else sync_wrapper
+        # Fix #18: Use asyncio.iscoroutinefunction instead of broken co_flags check.
+        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
     return decorator

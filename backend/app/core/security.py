@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import secrets
 import time
 from collections import defaultdict, deque
-from threading import Lock
 from typing import Deque, Dict
 
 from fastapi import HTTPException, Request, status
@@ -17,17 +17,26 @@ settings = get_settings()
 
 
 class _InMemoryRateLimiter:
-    """Simple process-local sliding-window rate limiter."""
+    """Simple process-local sliding-window rate limiter.
+
+    Uses ``asyncio.Lock`` so it is safe to call from async route handlers.
+
+    Note: state is per-process.  With a single Gunicorn worker (the
+    recommended Railway deployment) this is fine.  Under multi-worker
+    deployments each worker maintains its own counter, effectively
+    multiplying the rate limit by the number of workers.
+    """
 
     def __init__(self) -> None:
         self._hits: Dict[str, Deque[float]] = defaultdict(deque)
-        self._lock = Lock()
+        # Fix #16: asyncio.Lock instead of threading.Lock for async context.
+        self._lock = asyncio.Lock()
 
-    def check(self, key: str, now: float, max_requests: int, window_seconds: int) -> tuple[bool, int]:
+    async def check(self, key: str, now: float, max_requests: int, window_seconds: int) -> tuple[bool, int]:
         """Return whether request is allowed and retry-after seconds if blocked."""
         window_start = now - window_seconds
 
-        with self._lock:
+        async with self._lock:
             bucket = self._hits[key]
 
             while bucket and bucket[0] < window_start:
@@ -170,7 +179,7 @@ async def enforce_rate_limit(request: Request) -> None:
     path = request.url.path
     key = f"{client_ip}:{path}"
 
-    allowed, retry_after = rate_limiter.check(
+    allowed, retry_after = await rate_limiter.check(
         key=key,
         now=time.time(),
         max_requests=settings.RATE_LIMIT_REQUESTS,

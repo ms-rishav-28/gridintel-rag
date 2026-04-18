@@ -1,11 +1,13 @@
 """Document processing service for ingesting POWERGRID documents."""
 
+import asyncio
 import os
 import io
 import hashlib
 import ipaddress
 import re
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -28,6 +30,8 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="docproc")
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -84,6 +88,25 @@ class ProcessedDocument:
     file_hash: str
 
 
+# ─── Word-boundary patterns for document type detection (#15) ────
+
+_CEA_PATTERNS = [
+    re.compile(r'\bcea\b', re.IGNORECASE),
+    re.compile(r'central\s+electricity\s+authority', re.IGNORECASE),
+]
+_IT_CIRCULAR_PATTERNS = [
+    re.compile(r'\bit\s+circular\b', re.IGNORECASE),
+    re.compile(r'\bcircular\s+no\b', re.IGNORECASE),
+    re.compile(r'\bIT[-_]Circular\b', re.IGNORECASE),
+]
+_MANUAL_PATTERNS = [
+    re.compile(r'\bmanual\b', re.IGNORECASE),
+    re.compile(r'\btechnical\s+manual\b', re.IGNORECASE),
+    re.compile(r'\bmaintenance\s+manual\b', re.IGNORECASE),
+    re.compile(r'\boperation\s+manual\b', re.IGNORECASE),
+]
+
+
 class DocumentProcessor:
     """Handles document loading, processing, and chunking."""
     
@@ -102,23 +125,52 @@ class DocumentProcessor:
         return hashlib.sha256(file_content).hexdigest()
     
     def _detect_document_type(self, filename: str, content: bytes) -> str:
-        """Detect document type from filename and content."""
+        """Detect document type from filename and first bytes of content.
+
+        Fix #15: Uses word-boundary regex instead of fragile substring matching.
+        Also performs content-based detection by scanning the first 2000 bytes
+        of the extracted text for authoritative keywords.
+        """
         ext = Path(filename).suffix.lower()
-        
-        type_mapping = {
-            '.pdf': 'CEA_GUIDELINE' if 'cea' in filename.lower() else 
-                    'IT_CIRCULAR' if 'it' in filename.lower() or 'circular' in filename.lower()
-                    else 'TECHNICAL_MANUAL',
-            '.docx': 'CEA_GUIDELINE' if 'cea' in filename.lower() else 
-                     'IT_CIRCULAR' if 'it' in filename.lower() or 'circular' in filename.lower()
-                     else 'TECHNICAL_MANUAL',
-            '.doc': 'CEA_GUIDELINE' if 'cea' in filename.lower() else 
-                    'IT_CIRCULAR' if 'it' in filename.lower() or 'circular' in filename.lower()
-                    else 'TECHNICAL_MANUAL',
-            '.txt': 'TEXT_DOCUMENT',
-        }
-        
-        return type_mapping.get(ext, 'UNKNOWN')
+
+        # Not applicable to plain text
+        if ext == '.txt':
+            return 'TEXT_DOCUMENT'
+
+        # Check filename first using word-boundary patterns
+        for pattern in _CEA_PATTERNS:
+            if pattern.search(filename):
+                return 'CEA_GUIDELINE'
+
+        for pattern in _IT_CIRCULAR_PATTERNS:
+            if pattern.search(filename):
+                return 'IT_CIRCULAR'
+
+        for pattern in _MANUAL_PATTERNS:
+            if pattern.search(filename):
+                return 'TECHNICAL_MANUAL'
+
+        # Content-based detection: scan first 2000 bytes
+        try:
+            text_preview = content[:2000].decode('utf-8', errors='ignore')
+        except Exception:
+            text_preview = ""
+
+        if text_preview:
+            for pattern in _CEA_PATTERNS:
+                if pattern.search(text_preview):
+                    return 'CEA_GUIDELINE'
+
+            for pattern in _IT_CIRCULAR_PATTERNS:
+                if pattern.search(text_preview):
+                    return 'IT_CIRCULAR'
+
+            for pattern in _MANUAL_PATTERNS:
+                if pattern.search(text_preview):
+                    return 'TECHNICAL_MANUAL'
+
+        # Default for PDF/DOCX when no keywords match
+        return 'TECHNICAL_MANUAL'
     
     def _extract_metadata(self, filename: str, content: bytes, doc_type: str) -> Dict[str, Any]:
         """Extract metadata from document filename and content."""
@@ -147,12 +199,12 @@ class DocumentProcessor:
         
         filename_lower = filename.lower()
         for keyword, equipment_type in equipment_keywords.items():
-            if keyword in filename_lower:
+            # Use word-boundary matching for equipment keywords too
+            if re.search(rf'\b{re.escape(keyword)}\b', filename_lower):
                 metadata['equipment_type'] = equipment_type
                 break
         
         # Extract voltage level if present (e.g., 220kV, 400kV)
-        import re
         voltage_pattern = r'(\d+)\s*kV'
         voltage_matches = re.findall(voltage_pattern, filename, re.IGNORECASE)
         if voltage_matches:
@@ -315,77 +367,91 @@ class DocumentProcessor:
                 details={"file_path": str(file_path), "error": str(e)}
             )
     
+    def _process_file_sync(
+        self,
+        filename: str,
+        content: bytes,
+        custom_metadata: Optional[Dict[str, Any]] = None,
+        precomputed_hash: Optional[str] = None,
+    ) -> ProcessedDocument:
+        """Synchronous file processing — runs inside thread pool."""
+        logger.info("processing_document", filename=filename, size=len(content))
+
+        # Detect document type
+        doc_type = self._detect_document_type(filename, content)
+
+        # Extract metadata
+        metadata = self._extract_metadata(filename, content, doc_type)
+        # Use pre-computed hash if provided, avoiding double SHA-256 (fix audit #2)
+        if precomputed_hash:
+            metadata['file_hash'] = precomputed_hash
+        if custom_metadata:
+            metadata.update(custom_metadata)
+
+        # Save to temp file for processing
+        ext = Path(filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+            tmp_file.write(content)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            # Load document
+            documents = self._load_document(tmp_path, metadata)
+
+            # Split into chunks
+            chunks = self.text_splitter.split_documents(documents)
+
+            # Add chunk metadata
+            for i, chunk in enumerate(chunks):
+                chunk.metadata['chunk_index'] = i
+                chunk.metadata['total_chunks'] = len(chunks)
+                chunk.metadata['chunk_id'] = f"{metadata['file_hash']}_{i}"
+
+            # Create document ID
+            doc_id = metadata['file_hash'][:16]
+
+            logger.info(
+                "document_processed",
+                doc_id=doc_id,
+                filename=filename,
+                chunks=len(chunks),
+                doc_type=doc_type,
+            )
+
+            return ProcessedDocument(
+                doc_id=doc_id,
+                chunks=chunks,
+                metadata=metadata,
+                total_chunks=len(chunks),
+                file_hash=metadata['file_hash'],
+            )
+
+        finally:
+            # Cleanup temp file
+            if tmp_path.exists():
+                tmp_path.unlink()
+
     async def process_file(
         self,
         filename: str,
         content: bytes,
-        custom_metadata: Optional[Dict[str, Any]] = None
+        custom_metadata: Optional[Dict[str, Any]] = None,
+        precomputed_hash: Optional[str] = None,
     ) -> ProcessedDocument:
-        """
-        Process a file into chunks ready for vector embedding.
+        """Process a file into chunks ready for vector embedding (non-blocking).
         
+        The heavy lifting (PDF parsing, text splitting) is offloaded to a
+        thread pool so the event loop is not blocked.
+
         Args:
-            filename: Original filename
-            content: File content as bytes
-            custom_metadata: Optional additional metadata
-            
-        Returns:
-            ProcessedDocument containing chunks and metadata
+            precomputed_hash: If the caller already computed SHA-256, pass it
+                here to skip redundant hashing (saves ~200ms on 50MB files).
         """
-        logger.info("processing_document", filename=filename, size=len(content))
-        
         try:
-            # Detect document type
-            doc_type = self._detect_document_type(filename, content)
-            
-            # Extract metadata
-            metadata = self._extract_metadata(filename, content, doc_type)
-            if custom_metadata:
-                metadata.update(custom_metadata)
-            
-            # Save to temp file for processing
-            ext = Path(filename).suffix.lower()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-                tmp_file.write(content)
-                tmp_path = Path(tmp_file.name)
-            
-            try:
-                # Load document
-                documents = self._load_document(tmp_path, metadata)
-                
-                # Split into chunks
-                chunks = self.text_splitter.split_documents(documents)
-                
-                # Add chunk metadata
-                for i, chunk in enumerate(chunks):
-                    chunk.metadata['chunk_index'] = i
-                    chunk.metadata['total_chunks'] = len(chunks)
-                    chunk.metadata['chunk_id'] = f"{metadata['file_hash']}_{i}"
-                
-                # Create document ID
-                doc_id = metadata['file_hash'][:16]
-                
-                logger.info(
-                    "document_processed",
-                    doc_id=doc_id,
-                    filename=filename,
-                    chunks=len(chunks),
-                    doc_type=doc_type
-                )
-                
-                return ProcessedDocument(
-                    doc_id=doc_id,
-                    chunks=chunks,
-                    metadata=metadata,
-                    total_chunks=len(chunks),
-                    file_hash=metadata['file_hash']
-                )
-                
-            finally:
-                # Cleanup temp file
-                if tmp_path.exists():
-                    tmp_path.unlink()
-                    
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                _executor, self._process_file_sync, filename, content, custom_metadata, precomputed_hash,
+            )
         except DocumentProcessingError:
             raise
         except Exception as e:
@@ -489,20 +555,23 @@ class DocumentProcessor:
         self,
         files: List[tuple[str, bytes]]
     ) -> List[ProcessedDocument]:
-        """Process multiple files."""
-        results = []
+        """Process multiple files concurrently."""
+        tasks = []
         for filename, content in files:
-            try:
-                processed = await self.process_file(filename, content)
-                results.append(processed)
-            except DocumentProcessingError as e:
+            tasks.append(self.process_file(filename, content))
+
+        results: List[ProcessedDocument] = []
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, outcome in enumerate(outcomes):
+            if isinstance(outcome, Exception):
                 logger.error(
                     "batch_processing_error",
-                    filename=filename,
-                    error=str(e)
+                    filename=files[i][0],
+                    error=str(outcome),
                 )
-                # Continue processing other files
-                continue
+            else:
+                results.append(outcome)
+
         return results
 
 

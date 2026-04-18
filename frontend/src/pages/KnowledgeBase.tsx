@@ -12,11 +12,11 @@ import {
   type MetadataOptionsResponse,
 } from '../lib/api'
 
-type ConvexDocument = DocumentListItem
+type GridDocument = DocumentListItem
 
 const KnowledgeBase = () => {
   const navigate = useNavigate()
-  const [documents, setDocuments] = useState<ConvexDocument[]>([])
+  const [documents, setDocuments] = useState<GridDocument[]>([])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [activeFilter, setActiveFilter] = useState<string>('ALL')
@@ -101,7 +101,7 @@ const KnowledgeBase = () => {
     }
   }
 
-  const handleDelete = async (doc: ConvexDocument) => {
+  const handleDelete = async (doc: GridDocument) => {
     if (!window.confirm(`Remove "${doc.filename}" from the knowledge base?`)) return
 
     try {
@@ -408,8 +408,8 @@ function DocumentCard({
   doc,
   onDelete,
 }: {
-  doc: ConvexDocument
-  onDelete: (doc: ConvexDocument) => void
+  doc: GridDocument
+  onDelete: (doc: GridDocument) => void
 }) {
   const typeColors: Record<string, string> = {
     CEA_GUIDELINE: 'border-primary text-primary',
