@@ -378,7 +378,7 @@ async def list_documents():
         if docs:
             return {"documents": docs, "total": len(docs)}
 
-        # Fallback: scan ChromaDB metadata
+        # CODEX-FIX: temporary legacy fallback remains until route rewrite replaces vector APIs.
         vs = _get_vector_store()
         docs = await vs.list_documents()
         return {"documents": docs, "total": len(docs)}

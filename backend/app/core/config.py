@@ -1,4 +1,5 @@
 import sys
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 from typing import Optional, List
@@ -38,8 +39,11 @@ class Settings(BaseSettings):
     EMBEDDING_DEVICE: str = "cpu"
 
     # Vector Database
-    CHROMA_PERSIST_DIRECTORY: str = "./data/chroma_db"
-    CHROMA_COLLECTION_NAME: str = "powergrid_docs"
+    # CODEX-FIX: add LanceDB path for crash-safe vector persistence.
+    LANCEDB_PATH: str = Field(
+        default="./data/lancedb",
+        description="Path to LanceDB database directory. On Railway set to /data/lancedb.",
+    )
     VECTOR_SEARCH_K: int = 5
     # MiniLM-384 cosine similarity produces 0.2–0.6 for genuinely relevant
     # results. A threshold of 0.7 was killing almost every real match.

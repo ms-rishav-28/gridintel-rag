@@ -14,7 +14,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - DEFAULT_LLM_PROVIDER=${DEFAULT_LLM_PROVIDER:-gemini}
       - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-gemini-1.5-flash}
-      - CHROMA_PERSIST_DIRECTORY=/app/data/chroma_db
+      - LANCEDB_PATH=/app/data/lancedb
       - UPLOAD_DIR=/app/data/uploads
     volumes:
       - ./data:/app/data
@@ -26,20 +26,4 @@ services:
       retries: 3
       start_period: 10s
 
-  # Optional: Separate ChromaDB service for scaling
-  chromadb:
-    image: chromadb/chroma:latest
-    container_name: powergrid-chromadb
-    ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - ANONYMIZED_TELEMETRY=FALSE
-    restart: unless-stopped
-
-volumes:
-  chroma_data:
-    driver: local
+# CODEX-FIX: embedded LanceDB uses the mounted ./data volume; no external vector service is needed.

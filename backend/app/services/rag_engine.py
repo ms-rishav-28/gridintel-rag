@@ -79,7 +79,7 @@ class RAGEngine:
         if len(clauses) == 1:
             return clauses[0]
 
-        # Chroma where-filter expects a single top-level operator when combining conditions.
+        # CODEX-FIX: this legacy filter builder is removed by the hybrid LanceDB RAG rewrite.
         return {'$and': clauses}
     
     @log_execution_time(logger, "rag_query")

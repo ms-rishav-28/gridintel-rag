@@ -11,11 +11,12 @@ langchain>=0.3.0,<0.4.0
 langchain-community>=0.3.0,<0.4.0
 langchain-google-genai>=2.1.0,<3.0.0
 langchain-groq>=0.2.0,<1.0.0
-langchain-chroma>=0.2.0,<1.0.0
 langchain-huggingface>=0.1.0,<1.0.0
 
 # Vector Database
-chromadb>=0.6.0,<1.0.0
+# CODEX-FIX: use LanceDB/Arrow files instead of legacy SQLite vector persistence.
+lancedb>=0.13.0
+pyarrow>=17.0.0
 
 # Convex (backend persistence — graceful fallback when unconfigured)
 convex>=0.7.0

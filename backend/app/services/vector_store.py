@@ -1,360 +1,230 @@
-"""Vector store service for document embeddings and retrieval."""
+"""
+vector_store.py - LanceDB-backed vector store for POWERGRID SmartOps.
 
-from __future__ import annotations
+Storage layout:
+  LANCEDB_PATH/
+    powergrid_chunks.lance/   <- main table, Arrow format, crash-safe
+    powergrid_chunks.lance/_indices/  <- FTS index
+
+Data flow:
+  ingest  -> EmbeddingService.encode_dense() -> ChunkRecord -> table.add()
+  query   -> hybrid_search() -> rerank() -> top-5 chunks -> LLM
+  delete  -> table.delete(f"doc_id = '{doc_id}'")
+  reindex -> delete all -> re-add from re-processed documents
+"""
+
+# CODEX-FIX: replace the legacy SQLite-backed vector store with crash-safe LanceDB storage.
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+import os
+from typing import Any
 
-from chromadb.config import Settings as ChromaSettings
-from langchain.schema import Document as LangChainDocument
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+import lancedb
+from lancedb.pydantic import LanceModel, Vector
 
 from app.core.config import get_settings
-from app.core.exceptions import VectorStoreError
-from app.core.logging import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Dedicated thread pool for blocking ChromaDB / embedding calls so the
-# event loop is never starved.  A small pool is fine — we only need to
-# avoid blocking, not achieve massive parallelism.
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vectorstore")
+
+# -- Schema --------------------------------------------------------------------
+
+class ChunkRecord(LanceModel):
+    chunk_id: str
+    doc_id: str
+    doc_name: str
+    source_type: str
+    source_url: str | None
+    page_number: int | None
+    chunk_index: int
+    section_heading: str | None
+    chunk_type: str
+    content: str
+    vector: Vector(1024)
 
 
-class VectorStoreService:
-    """Manages vector embeddings and similarity search.
+# -- Service -------------------------------------------------------------------
 
-    All public methods are ``async`` and offload blocking work to a thread pool
-    via ``run_in_executor`` so they can be called safely from async route
-    handlers without freezing the event loop (fixes #5).
-    """
+class VectorStore:
+    TABLE_NAME = "powergrid_chunks"
 
-    def __init__(self) -> None:
-        self.persist_dir = Path(settings.CHROMA_PERSIST_DIRECTORY)
-        self.persist_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        self._db: lancedb.AsyncConnection | None = None
+        self._table = None
+        self._ready = False
 
-        self._embeddings: Optional[HuggingFaceEmbeddings] = None
-        self._vectorstore: Optional[Chroma] = None
+    async def initialize(self) -> None:
+        """Connect to or create the LanceDB database. Called once at startup."""
+        path = settings.LANCEDB_PATH
+        os.makedirs(path, exist_ok=True)
+        logger.info("initialising_lancedb", path=path)
 
-    def _ensure_initialized(self) -> None:
-        """Initialize expensive embedding/vector clients lazily on first use."""
-        if self._vectorstore is not None:
-            return
+        self._db = await lancedb.connect_async(path)
+        existing = await self._db.table_names()
 
-        try:
-            self._embeddings = HuggingFaceEmbeddings(
-                model_name=settings.EMBEDDING_MODEL,
-                model_kwargs={"device": settings.EMBEDDING_DEVICE},
-                encode_kwargs={"normalize_embeddings": True},
-            )
-
-            self._vectorstore = Chroma(
-                collection_name=settings.CHROMA_COLLECTION_NAME,
-                embedding_function=self._embeddings,
-                persist_directory=str(self.persist_dir),
-                client_settings=ChromaSettings(
-                    anonymized_telemetry=False,
-                    allow_reset=True,
-                ),
-            )
-
+        if self.TABLE_NAME in existing:
+            self._table = await self._db.open_table(self.TABLE_NAME)
+            schema = await self._table.schema()
+            vec_field = next((field for field in schema if field.name == "vector"), None)
+            if vec_field is not None:
+                stored_dim = vec_field.type.list_size
+                if stored_dim != 1024:
+                    logger.critical(
+                        "lancedb_embedding_dimension_mismatch",
+                        stored_dim=stored_dim,
+                        current_dim=1024,
+                    )
+                    await self._db.drop_table(self.TABLE_NAME)
+                    await self._create_table()
             logger.info(
-                "vector_store_initialized",
-                collection=settings.CHROMA_COLLECTION_NAME,
-                persist_dir=str(self.persist_dir),
+                "lancedb_table_opened",
+                table=self.TABLE_NAME,
+                rows=await self._table.count_rows(),
             )
+        else:
+            await self._create_table()
 
-        except Exception as e:
-            logger.error("vector_store_init_failed", error=str(e))
-            raise VectorStoreError(
-                f"Failed to initialize vector store: {str(e)}",
-                operation="initialize",
-            )
+        self._ready = True
 
-    def _get_vectorstore(self) -> Chroma:
-        self._ensure_initialized()
-        if self._vectorstore is None:
-            raise VectorStoreError("Vector store is unavailable", operation="initialize")
-        return self._vectorstore
+    async def _create_table(self) -> None:
+        """Create the table and enable full-text search index."""
+        if self._db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
+        self._table = await self._db.create_table(
+            self.TABLE_NAME,
+            schema=ChunkRecord,
+            mode="overwrite",
+        )
+        await self._table.create_fts_index("content", replace=True)
+        logger.info("lancedb_table_created", table=self.TABLE_NAME)
 
-    # ── Blocking internals (run inside thread pool) ──────────────
+    def _ensure_ready(self) -> None:
+        if not self._ready or self._table is None:
+            raise RuntimeError("LanceDB vector store is not initialized")
 
-    def _add_documents_sync(
+    # -- Write ------------------------------------------------------------------
+
+    async def add_chunks(self, chunks: list[ChunkRecord]) -> None:
+        """Batch upsert chunks. Existing chunk_ids are replaced."""
+        if not chunks:
+            return
+        self._ensure_ready()
+        records = [chunk.model_dump() for chunk in chunks]
+        await asyncio.to_thread(
+            lambda: self._table.merge_insert("chunk_id")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(records)
+        )
+
+    async def delete_by_doc_id(self, doc_id: str) -> int:
+        """Delete all chunks for a document. Returns deleted row count."""
+        self._ensure_ready()
+        before = await self._table.count_rows()
+        escaped_doc_id = doc_id.replace("'", "''")
+        await self._table.delete(f"doc_id = '{escaped_doc_id}'")
+        after = await self._table.count_rows()
+        deleted = before - after
+        logger.info("lancedb_chunks_deleted", doc_id=doc_id, deleted=deleted)
+        return deleted
+
+    async def delete_all(self) -> None:
+        """Wipe the entire table. Used before a full reindex."""
+        if self._db is None:
+            raise RuntimeError("LanceDB connection is not initialized")
+        await self._db.drop_table(self.TABLE_NAME)
+        await self._create_table()
+        self._ready = True
+        logger.warning("lancedb_table_wiped_for_reindex")
+
+    # -- Read -------------------------------------------------------------------
+
+    async def dense_search(
         self,
-        documents: List[LangChainDocument],
-        doc_id: str,
-    ) -> int:
-        if not documents:
-            logger.warning("no_documents_to_add", doc_id=doc_id)
-            return 0
+        query_vector: list[float],
+        top_k: int = 20,
+        where: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """ANN search using dense BGE-M3 embeddings."""
+        self._ensure_ready()
+        query = self._table.vector_search(query_vector).limit(top_k)
+        if where:
+            query = query.where(where)
+        return await query.to_list()
 
-        vectorstore = self._get_vectorstore()
-
-        for doc in documents:
-            doc.metadata["doc_id"] = doc_id
-
-        ids = [f"{doc_id}_{i}" for i in range(len(documents))]
-        vectorstore.add_documents(documents, ids=ids)
-
-        logger.info(
-            "documents_added_to_vectorstore",
-            doc_id=doc_id,
-            count=len(documents),
-        )
-        return len(documents)
-
-    def _similarity_search_sync(
+    async def hybrid_search(
         self,
-        query: str,
-        k: int,
-        filter_dict: Optional[Dict[str, Any]],
-        score_threshold: float,
-    ) -> List[Tuple[LangChainDocument, float]]:
-        vectorstore = self._get_vectorstore()
+        query_text: str,
+        query_vector: list[float],
+        top_k: int = 20,
+        where: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Hybrid dense ANN + full-text search, merged via Reciprocal Rank Fusion.
+        Returns up to top_k deduplicated results ranked by RRF score.
+        """
+        self._ensure_ready()
+        dense_results = await self.dense_search(query_vector, top_k * 2, where)
 
-        results = vectorstore.similarity_search_with_relevance_scores(
-            query=query,
-            k=k * 2,
-            filter=filter_dict,
-        )
+        fts_query = self._table.fts_search(query_text).limit(top_k * 2)
+        if where:
+            fts_query = fts_query.where(where)
+        fts_results = await fts_query.to_list()
 
-        filtered_results = [
-            (doc, score) for doc, score in results if score >= score_threshold
-        ][:k]
+        scores: dict[str, float] = {}
+        records: dict[str, dict[str, Any]] = {}
 
-        logger.info(
-            "similarity_search_completed",
-            query=query[:50],
-            results_found=len(results),
-            results_returned=len(filtered_results),
-            threshold=score_threshold,
-        )
+        for rank, row in enumerate(dense_results):
+            chunk_id = row["chunk_id"]
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank + 1)
+            records[chunk_id] = row
 
-        return filtered_results
+        for rank, row in enumerate(fts_results):
+            chunk_id = row["chunk_id"]
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank + 1)
+            records[chunk_id] = row
 
-    def _delete_document_sync(self, doc_id: str) -> bool:
-        vectorstore = self._get_vectorstore()
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:top_k]
+        merged: list[dict[str, Any]] = []
+        for chunk_id, score in ranked:
+            row = records[chunk_id].copy()
+            row["rrf_score"] = score
+            merged.append(row)
 
+        return merged
+
+    async def list_doc_ids(self) -> list[str]:
+        self._ensure_ready()
+        rows = await self._table.query().select(["doc_id"]).to_list()
+        return list({row["doc_id"] for row in rows})
+
+    async def get_stats(self) -> dict[str, Any]:
+        self._ensure_ready()
+        row_count = await self._table.count_rows()
+        db_path = settings.LANCEDB_PATH
         try:
-            vectorstore.delete(where={"doc_id": doc_id})
+            size_bytes = sum(
+                os.path.getsize(os.path.join(dirpath, filename))
+                for dirpath, _, filenames in os.walk(db_path)
+                for filename in filenames
+            )
         except Exception:
-            raw = vectorstore._collection.get(include=[])
-            all_ids = raw.get("ids", [])
-            target_ids = [
-                chunk_id for chunk_id in all_ids
-                if chunk_id == doc_id or chunk_id.startswith(f"{doc_id}_")
-            ]
-            if target_ids:
-                vectorstore.delete(ids=target_ids)
-
-        logger.info("document_deleted_from_vectorstore", doc_id=doc_id)
-        return True
-
-    def _get_collection_stats_sync(self) -> Dict[str, Any]:
-        vectorstore = self._get_vectorstore()
-        count = vectorstore._collection.count()
+            size_bytes = -1
         return {
-            "total_documents": count,
-            "collection_name": settings.CHROMA_COLLECTION_NAME,
-            "embedding_model": settings.EMBEDDING_MODEL,
-            "status": "ready",
+            "status": "healthy" if self._ready else "not_ready",
+            "row_count": row_count,
+            "path": db_path,
+            "size_bytes": size_bytes,
         }
 
-    def _check_hash_exists_sync(self, file_hash: str) -> bool:
-        """Return True if any chunk with the given file_hash already exists."""
-        vectorstore = self._get_vectorstore()
-        try:
-            results = vectorstore._collection.get(
-                where={"file_hash": file_hash},
-                limit=1,
-                include=[],
-            )
-            return bool(results and results.get("ids"))
-        except Exception:
-            return False
 
-    def _list_documents_sync(self) -> List[Dict[str, Any]]:
-        """List unique documents via paginated chunk metadata scan."""
-        collection = self._get_vectorstore()._collection
-        count = collection.count()
-        if count == 0:
-            return []
-
-        docs_map: Dict[str, Dict[str, Any]] = {}
-        page_size = 500
-        offset = 0
-
-        while offset < count:
-            batch = collection.get(
-                include=["metadatas"],
-                limit=page_size,
-                offset=offset,
-            )
-            metadatas = batch.get("metadatas", [])
-            ids = batch.get("ids", [])
-
-            if not metadatas:
-                break
-
-            for index, meta in enumerate(metadatas):
-                if not meta:
-                    continue
-
-                fallback_id = ids[index] if index < len(ids) else ""
-                doc_id = meta.get(
-                    "doc_id",
-                    fallback_id.rsplit("_", 1)[0] if "_" in fallback_id else fallback_id,
-                )
-
-                if doc_id not in docs_map:
-                    docs_map[doc_id] = {
-                        "doc_id": doc_id,
-                        "filename": meta.get("source", meta.get("filename", "Unknown")),
-                        "doc_type": meta.get("doc_type", "UNKNOWN"),
-                        "equipment_type": meta.get("equipment_type"),
-                        "voltage_level": meta.get("voltage_level"),
-                        "chunks_count": 0,
-                    }
-
-                docs_map[doc_id]["chunks_count"] += 1
-
-            offset += page_size
-
-        return list(docs_map.values())
-
-    def _clear_collection_sync(self) -> bool:
-        vectorstore = self._get_vectorstore()
-        vectorstore.delete_collection()
-        self._vectorstore = None
-        self._ensure_initialized()
-        logger.warning("vector_collection_cleared")
-        return True
-
-    # ── Async public API ─────────────────────────────────────────
-
-    async def add_documents(
-        self,
-        documents: List[LangChainDocument],
-        doc_id: str,
-    ) -> int:
-        """Add documents to vector store (non-blocking)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._add_documents_sync, documents, doc_id,
-            )
-        except VectorStoreError:
-            raise
-        except Exception as e:
-            logger.error("failed_to_add_documents", error=str(e), doc_id=doc_id)
-            raise VectorStoreError(
-                f"Failed to add documents: {str(e)}",
-                operation="add_documents",
-            )
-
-    async def similarity_search(
-        self,
-        query: str,
-        k: int = None,
-        filter_dict: Optional[Dict[str, Any]] = None,
-        score_threshold: float = None,
-    ) -> List[Tuple[LangChainDocument, float]]:
-        """Perform similarity search with relevance score filtering (non-blocking)."""
-        try:
-            k = k or settings.VECTOR_SEARCH_K
-            score_threshold = score_threshold if score_threshold is not None else settings.VECTOR_SEARCH_SCORE_THRESHOLD
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor,
-                self._similarity_search_sync,
-                query, k, filter_dict, score_threshold,
-            )
-        except VectorStoreError:
-            raise
-        except Exception as e:
-            logger.error("similarity_search_failed", error=str(e), query=query[:50])
-            raise VectorStoreError(
-                f"Search failed: {str(e)}",
-                operation="similarity_search",
-            )
-
-    async def delete_document(self, doc_id: str) -> bool:
-        """Delete all chunks belonging to a document ID (non-blocking)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._delete_document_sync, doc_id,
-            )
-        except VectorStoreError:
-            raise
-        except Exception as e:
-            logger.error("failed_to_delete_document", error=str(e), doc_id=doc_id)
-            raise VectorStoreError(
-                f"Failed to delete document: {str(e)}",
-                operation="delete_document",
-            )
-
-    async def get_collection_stats(self) -> Dict[str, Any]:
-        """Return collection stats (non-blocking, degrades gracefully)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._get_collection_stats_sync,
-            )
-        except Exception as e:
-            logger.warning("vector_store_stats_unavailable", error=str(e))
-            return {
-                "total_documents": 0,
-                "collection_name": settings.CHROMA_COLLECTION_NAME,
-                "embedding_model": settings.EMBEDDING_MODEL,
-                "status": "unavailable",
-                "error": str(e),
-            }
-
-    async def check_hash_exists(self, file_hash: str) -> bool:
-        """Check if a document with the given hash is already indexed (#11)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._check_hash_exists_sync, file_hash,
-            )
-        except Exception:
-            return False
-
-    async def clear_collection(self) -> bool:
-        """Clear all indexed data and recreate the collection (non-blocking)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._clear_collection_sync,
-            )
-        except Exception as e:
-            logger.error("failed_to_clear_collection", error=str(e))
-            raise VectorStoreError(
-                f"Failed to clear collection: {str(e)}",
-                operation="clear_collection",
-            )
-
-    async def list_documents(self) -> List[Dict[str, Any]]:
-        """List unique documents in the vector index (non-blocking, paginated)."""
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._list_documents_sync,
-            )
-        except VectorStoreError:
-            raise
-        except Exception as e:
-            logger.error("failed_to_list_documents", error=str(e))
-            raise VectorStoreError(
-                f"Failed to list documents: {str(e)}",
-                operation="list_documents",
-            )
+_vector_store: VectorStore | None = None
 
 
-# Singleton instance
-vector_store = VectorStoreService()
+def get_vector_store() -> VectorStore:
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = VectorStore()
+    return _vector_store

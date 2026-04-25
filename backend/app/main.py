@@ -47,7 +47,10 @@ async def lifespan(app: FastAPI):
     # Ensure data directories exist
     from pathlib import Path
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-    Path(settings.CHROMA_PERSIST_DIRECTORY).mkdir(parents=True, exist_ok=True)
+    # CODEX-FIX: initialize LanceDB on startup so Railway logs fail fast on vector-store issues.
+    from app.services.vector_store import get_vector_store
+    await get_vector_store().initialize()
+    logger.info("lancedb_stats", **await get_vector_store().get_stats())
 
     logger.info("application_ready")
     yield
