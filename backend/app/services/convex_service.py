@@ -1,297 +1,210 @@
-"""Convex service for persistent data storage.
+"""
+convex_service.py - Backend interface to Convex.
 
-Provides durable storage for document metadata, chat sessions, and settings.
-Gracefully degrades to in-memory mode if Convex is not configured,
-allowing local development without a Convex deployment.
-
-All public methods are ``async`` and offload blocking Convex HTTP calls
-to a thread pool so the event loop is never starved (audit fix #4).
+All operations are async-compatible via asyncio.to_thread().
+Falls back gracefully when CONVEX_URL is not configured.
 """
 
-from __future__ import annotations
+# CODEX-FIX: align backend persistence calls with the Convex schema/functions used by the frontend.
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any
 
 from app.core.config import get_settings
-from app.core.logging import get_logger
 
-logger = get_logger(__name__)
-settings = get_settings()
-
-# In-memory fallback stores
-_mem_documents: Dict[str, Dict[str, Any]] = {}
-_mem_chats: Dict[str, Dict[str, Any]] = {}
-_mem_settings: Dict[str, Any] = {
-    "theme": "light",
-    "notifications": {"critical": True, "insights": True},
-}
-
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="convex")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_convex_client():
-    """Lazily initialize and return the Convex client, or None."""
-    try:
-        if not settings.CONVEX_URL:
-            return None
-
-        from convex import ConvexClient
-
-        client = ConvexClient(settings.CONVEX_URL)
-        if settings.CONVEX_ADMIN_KEY:
-            client.set_admin_auth(settings.CONVEX_ADMIN_KEY)
-        return client
-    except Exception as e:
-        logger.warning("convex_init_failed", error=str(e))
-        return None
+logger = logging.getLogger(__name__)
 
 
 class ConvexService:
-    """Persistent storage backed by Convex with in-memory fallback.
-
-    All public methods are async. Sync Convex SDK calls are offloaded to
-    a thread pool via ``run_in_executor`` (audit fix #4).
-    """
-
     def __init__(self):
-        self._client = _get_convex_client()
-        if self._client:
-            logger.info("convex_connected", deployment_url=settings.CONVEX_URL)
-        else:
+        self.enabled = False
+        self._client = None
+        settings = get_settings()
+
+        if not settings.CONVEX_URL:
             logger.warning(
-                "convex_not_configured",
-                message=(
-                    "Running in memory-only mode. Data will NOT persist across restarts. "
-                    "Set CONVEX_URL to enable persistence."
-                ),
+                "CONVEX_URL not set - running in memory-only mode. "
+                "All data will be lost on backend restart."
             )
+            return
+
+        try:
+            from convex import ConvexClient
+
+            self._client = ConvexClient(settings.CONVEX_URL)
+            if settings.CONVEX_ADMIN_KEY and hasattr(self._client, "set_admin_auth"):
+                self._client.set_admin_auth(settings.CONVEX_ADMIN_KEY)
+            self.enabled = True
+            logger.info("convex_connected", url=settings.CONVEX_URL)
+        except ImportError:
+            logger.error("convex package not installed. pip install convex")
+        except Exception as exc:
+            logger.error("convex_connection_failed", error=str(exc))
 
     @property
     def is_connected(self) -> bool:
-        return self._client is not None
+        return self.enabled
 
-    def _query(self, name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-        if not self._client:
-            raise RuntimeError("Convex client unavailable")
-        return self._client.query(name, args or {})
+    async def _call(self, fn: str, args: dict[str, Any] | None = None) -> Any:
+        """Run a Convex mutation or query in a thread because the client is sync."""
+        if not self.enabled or self._client is None:
+            return None
+        try:
+            if fn.startswith("query:"):
+                return await asyncio.to_thread(self._client.query, fn[6:], args or {})
+            return await asyncio.to_thread(self._client.mutation, fn, args or {})
+        except Exception as exc:
+            logger.error("convex_call_failed", function=fn, error=str(exc), exc_info=True)
+            return None
 
-    def _mutation(self, name: str, args: Optional[Dict[str, Any]] = None) -> Any:
-        if not self._client:
-            raise RuntimeError("Convex client unavailable")
-        return self._client.mutation(name, args or {})
+    # -- Documents --------------------------------------------------------------
 
-    # ─── Document Metadata (sync internals) ──────────────────────
+    async def generate_upload_url(self) -> str | None:
+        return await self._call("documents:generateUploadUrl", {})
 
-    def _save_document_metadata_sync(self, doc_id: str, metadata: Dict[str, Any]) -> None:
-        record = {
-            "doc_id": doc_id,
-            "filename": metadata.get("source", metadata.get("filename", "Unknown")),
-            "doc_type": metadata.get("doc_type", "UNKNOWN"),
-            "equipment_type": metadata.get("equipment_type"),
-            "voltage_level": metadata.get("voltage_level"),
-            "chunks_count": metadata.get("chunks_count", 0),
-            "file_hash": metadata.get("file_hash", ""),
-            "file_size": metadata.get("file_size", 0),
-            "uploaded_at": _now_iso(),
-            "status": "active",
+    async def create_document(
+        self,
+        doc_id: str,
+        name: str,
+        source_type: str,
+        source_url: str | None = None,
+        storage_id: str | None = None,
+        file_size_bytes: int | None = None,
+        sha256: str | None = None,
+    ):
+        return await self._call(
+            "documents:createDocument",
+            {
+                "docId": doc_id,
+                "name": name,
+                "sourceType": source_type,
+                "sourceUrl": source_url,
+                "storageId": storage_id,
+                "fileSizeBytes": file_size_bytes,
+                "sha256": sha256,
+            },
+        )
+
+    async def update_document(self, doc_id: str, **kwargs):
+        camel = {
+            "ingestion_status": "ingestionStatus",
+            "chunk_count": "chunkCount",
+            "image_count": "imageCount",
+            "error_message": "errorMessage",
+            "progress_message": "progressMessage",
+            "storage_id": "storageId",
         }
+        payload: dict[str, Any] = {"docId": doc_id}
+        for key, value in kwargs.items():
+            if value is not None:
+                payload[camel.get(key, key)] = value
+        return await self._call("documents:updateDocument", payload)
 
-        try:
-            if self._client:
-                self._mutation("documents:upsertMetadata", record)
-            else:
-                _mem_documents[doc_id] = record
-            logger.info("document_metadata_saved", doc_id=doc_id)
-        except Exception as e:
-            logger.warning("convex_document_save_failed_fallback", error=str(e), doc_id=doc_id)
-            _mem_documents[doc_id] = record
+    async def delete_document(self, doc_id: str):
+        return await self._call("documents:deleteDocument", {"docId": doc_id})
 
-    def _list_documents_sync(self) -> List[Dict[str, Any]]:
-        try:
-            if self._client:
-                documents = self._query("documents:listActive")
-                if isinstance(documents, list):
-                    return documents
-                return []
-            return [d for d in _mem_documents.values() if d.get("status") == "active"]
-        except Exception as e:
-            logger.warning("convex_documents_list_failed_fallback", error=str(e))
-            return [d for d in _mem_documents.values() if d.get("status") == "active"]
+    async def list_documents(self) -> list[dict[str, Any]]:
+        result = await self._call("query:documents:listDocuments", {})
+        return result or []
 
-    def _delete_document_metadata_sync(self, doc_id: str) -> None:
-        try:
-            if self._client:
-                self._mutation("documents:softDeleteDocument", {"doc_id": doc_id})
-            elif doc_id in _mem_documents:
-                _mem_documents[doc_id]["status"] = "deleted"
-        except Exception as e:
-            logger.warning("convex_document_delete_failed_fallback", error=str(e), doc_id=doc_id)
-            if doc_id in _mem_documents:
-                _mem_documents[doc_id]["status"] = "deleted"
+    async def get_document_by_hash(self, sha256: str):
+        return await self._call("query:documents:getDocumentByHash", {"sha256": sha256})
 
-    # ─── Chat Sessions (sync internals) ──────────────────────────
+    async def get_document_download_url(self, doc_id: str) -> str | None:
+        return await self._call("query:documents:getDocumentDownloadUrl", {"docId": doc_id})
 
-    def _save_chat_message_sync(self, session_id: str, message: Dict[str, Any]) -> None:
-        msg = {
-            "role": message.get("role", "user"),
-            "content": message.get("content", ""),
-            "timestamp": message.get("timestamp", _now_iso()),
-            "citations": message.get("citations", []),
-            "confidence": message.get("confidence"),
-            "model_used": message.get("model_used"),
-            "provider": message.get("provider"),
-            "query_time_ms": message.get("query_time_ms"),
-            "documents_retrieved": message.get("documents_retrieved"),
-            "is_insufficient": message.get("is_insufficient"),
+    # -- Jobs -------------------------------------------------------------------
+
+    async def create_job(
+        self,
+        job_id: str,
+        source_type: str,
+        doc_id: str | None = None,
+        source_url: str | None = None,
+    ):
+        return await self._call(
+            "jobs:createJob",
+            {
+                "jobId": job_id,
+                "sourceType": source_type,
+                "docId": doc_id,
+                "sourceUrl": source_url,
+            },
+        )
+
+    async def update_job(self, job_id: str, **kwargs):
+        camel = {
+            "progress_message": "progressMessage",
+            "error_message": "errorMessage",
+            "total_chunks": "totalChunks",
+            "processed_chunks": "processedChunks",
+            "doc_id": "docId",
         }
+        payload: dict[str, Any] = {"jobId": job_id}
+        for key, value in kwargs.items():
+            if value is not None:
+                payload[camel.get(key, key)] = value
+        return await self._call("jobs:updateJob", payload)
 
-        try:
-            if self._client:
-                self._mutation(
-                    "chat:saveMessage",
-                    {
-                        "session_id": session_id,
-                        **msg,
-                    },
-                )
-                return
+    async def get_job(self, job_id: str):
+        return await self._call("query:jobs:getJob", {"jobId": job_id})
 
-            if session_id not in _mem_chats:
-                _mem_chats[session_id] = {
-                    "session_id": session_id,
-                    "created_at": _now_iso(),
-                    "messages": [],
-                }
-            _mem_chats[session_id]["messages"].append(msg)
-            _mem_chats[session_id]["updated_at"] = _now_iso()
-        except Exception as e:
-            logger.warning("convex_chat_save_failed_fallback", error=str(e), session_id=session_id)
-            if session_id not in _mem_chats:
-                _mem_chats[session_id] = {
-                    "session_id": session_id,
-                    "created_at": _now_iso(),
-                    "messages": [],
-                }
-            _mem_chats[session_id]["messages"].append(msg)
-            _mem_chats[session_id]["updated_at"] = _now_iso()
+    # -- Chat -------------------------------------------------------------------
 
-    def _get_chat_history_sync(self, session_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            if self._client:
-                session = self._query("chat:getSession", {"session_id": session_id})
-                if session and isinstance(session, dict):
-                    return session
-                return None
-            return _mem_chats.get(session_id)
-        except Exception as e:
-            logger.warning("convex_chat_history_failed_fallback", error=str(e), session_id=session_id)
-            return _mem_chats.get(session_id)
+    async def create_session(self, title: str = "New Chat") -> str | None:
+        result = await self._call("chat:createSession", {"title": title})
+        return result
 
-    def _list_chat_sessions_sync(self) -> List[Dict[str, Any]]:
-        try:
-            if self._client:
-                sessions = self._query("chat:listSessions")
-                if isinstance(sessions, list):
-                    return sessions
-                return []
-            return [
-                {
-                    "session_id": v["session_id"],
-                    "created_at": v.get("created_at"),
-                    "updated_at": v.get("updated_at"),
-                    "message_count": len(v.get("messages", [])),
-                }
-                for v in _mem_chats.values()
-            ]
-        except Exception as e:
-            logger.warning("convex_chat_sessions_failed_fallback", error=str(e))
-            return [
-                {
-                    "session_id": v["session_id"],
-                    "created_at": v.get("created_at"),
-                    "updated_at": v.get("updated_at"),
-                    "message_count": len(v.get("messages", [])),
-                }
-                for v in _mem_chats.values()
-            ]
+    async def append_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        citations: list[dict[str, Any]] | None = None,
+        llm_provider: str | None = None,
+        duration_ms: int | None = None,
+    ):
+        return await self._call(
+            "chat:appendMessage",
+            {
+                "sessionId": session_id,
+                "role": role,
+                "content": content,
+                "citations": citations,
+                "llmProvider": llm_provider,
+                "durationMs": duration_ms,
+            },
+        )
 
-    # ─── User Settings (sync internals) ──────────────────────────
+    async def get_last_n_messages(self, session_id: str, n: int = 6) -> list[dict[str, Any]]:
+        result = await self._call(
+            "query:chat:getLastNMessages",
+            {"sessionId": session_id, "n": n},
+        )
+        return result or []
 
-    def _save_settings_sync(self, user_settings: Dict[str, Any]) -> None:
-        try:
-            if self._client:
-                self._mutation("settings:upsertSettings", user_settings)
-            else:
-                _mem_settings.update(user_settings)
-        except Exception as e:
-            logger.warning("convex_settings_save_failed_fallback", error=str(e))
-            _mem_settings.update(user_settings)
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        result = await self._call("query:chat:listSessions", {})
+        return result or []
 
-    def _get_settings_sync(self) -> Dict[str, Any]:
-        default_settings = {
-            "theme": "light",
-            "notifications": {"critical": True, "insights": True},
-        }
-        try:
-            if self._client:
-                data = self._query("settings:getSettings")
-                if isinstance(data, dict) and data:
-                    return data
-                return default_settings
-            return _mem_settings.copy()
-        except Exception as e:
-            logger.warning("convex_settings_get_failed_fallback", error=str(e))
-            return _mem_settings.copy()
+    async def delete_session(self, session_id: str):
+        return await self._call("chat:deleteSession", {"sessionId": session_id})
 
-    # ─── Async public API (audit fix #4) ─────────────────────────
+    # -- Settings ---------------------------------------------------------------
 
-    async def save_document_metadata(self, doc_id: str, metadata: Dict[str, Any]) -> None:
-        """Persist document metadata after successful vector ingestion."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor, self._save_document_metadata_sync, doc_id, metadata)
+    async def get_settings(self) -> dict[str, Any] | None:
+        return await self._call("query:settings:getSettings", {})
 
-    async def list_documents(self) -> List[Dict[str, Any]]:
-        """Return all active documents."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._list_documents_sync)
-
-    async def delete_document_metadata(self, doc_id: str) -> None:
-        """Soft-delete a document by marking status."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor, self._delete_document_metadata_sync, doc_id)
-
-    async def save_chat_message(self, session_id: str, message: Dict[str, Any]) -> None:
-        """Append a message to a chat session."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor, self._save_chat_message_sync, session_id, message)
-
-    async def get_chat_history(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve full chat session."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._get_chat_history_sync, session_id)
-
-    async def list_chat_sessions(self) -> List[Dict[str, Any]]:
-        """List all chat sessions (metadata only, no messages)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._list_chat_sessions_sync)
-
-    async def save_settings(self, user_settings: Dict[str, Any]) -> None:
-        """Persist user/app settings."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor, self._save_settings_sync, user_settings)
-
-    async def get_settings(self) -> Dict[str, Any]:
-        """Retrieve user/app settings."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._get_settings_sync)
+    async def save_settings(self, **kwargs):
+        return await self._call("settings:saveSettings", kwargs)
 
 
-# Singleton — safe to import because it gracefully degrades
-convex_service = ConvexService()
+_convex_service: ConvexService | None = None
+
+
+def get_convex_service() -> ConvexService:
+    global _convex_service
+    if _convex_service is None:
+        _convex_service = ConvexService()
+    return _convex_service
