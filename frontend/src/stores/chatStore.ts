@@ -1,168 +1,161 @@
-import { create } from 'zustand'
-import { queryDocuments, saveChatMessage, getChatHistory, type QueryResponse, type Citation, type QueryRequest } from '../lib/api'
+// CODEX-FIX: make chat state session-aware and backed by the RAG API/Convex persistence path.
 
-export interface ChatMessage {
+import { create } from 'zustand'
+import {
+  createChatSession,
+  getChatMessages,
+  listChatSessions,
+  queryRag,
+  type Citation,
+  type ChatMessageRecord,
+  type ChatSession,
+} from '../lib/api'
+
+export interface Session {
+  id: string
+  title: string
+  messageCount: number
+  updatedAt: number
+}
+
+export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  timestamp: Date
   citations?: Citation[]
-  confidence?: number
-  modelUsed?: string
-  provider?: string
-  queryTimeMs?: number
-  documentsRetrieved?: number
-  isInsufficient?: boolean
+  createdAt: number
+  llmProvider?: string
+  durationMs?: number
 }
 
-interface ChatState {
-  sessionId: string
-  messages: ChatMessage[]
+interface ChatStore {
+  sessions: Session[]
+  currentSessionId: string | null
+  messages: Message[]
   isLoading: boolean
-  isHydrated: boolean
   error: string | null
-  sendMessage: (question: string, options?: Omit<QueryRequest, 'question'>) => Promise<void>
-  clearChat: () => void
-  hydrateFromBackend: () => Promise<void>
+  loadSessions: () => Promise<void>
+  createSession: () => Promise<string>
+  setCurrentSession: (id: string) => Promise<void>
+  sendMessage: (query: string) => Promise<void>
+  clearError: () => void
 }
 
-let messageCounter = 0
-const generateId = () => `msg_${Date.now()}_${++messageCounter}`
-
-// Generate a stable session ID per browser tab
-const SESSION_KEY = 'powergrid_session_id'
-function getOrCreateSessionId(): string {
-  let id = sessionStorage.getItem(SESSION_KEY)
-  if (!id) {
-    id = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    sessionStorage.setItem(SESSION_KEY, id)
+function normalizeSession(session: ChatSession): Session {
+  return {
+    id: session._id ?? '',
+    title: session.title,
+    messageCount: session.messageCount,
+    updatedAt: session.updatedAt,
   }
-  return id
 }
 
-export const useChatStore = create<ChatState>((set, get) => ({
-  sessionId: getOrCreateSessionId(),
+function normalizeMessage(message: ChatMessageRecord, index: number): Message {
+  return {
+    id: message._id ?? `${message.role}_${message.createdAt}_${index}`,
+    role: message.role,
+    content: message.content,
+    citations: message.citations,
+    createdAt: message.createdAt,
+    llmProvider: message.llmProvider,
+    durationMs: message.durationMs,
+  }
+}
+
+function errorToMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Request failed'
+}
+
+export const useChatStore = create<ChatStore>((set, get) => ({
+  sessions: [],
+  currentSessionId: null,
   messages: [],
   isLoading: false,
-  isHydrated: false,
   error: null,
 
-  hydrateFromBackend: async () => {
-    if (get().isHydrated) return
+  loadSessions: async () => {
+    const rawSessions = await listChatSessions()
+    const sessions = rawSessions.map(normalizeSession).filter((session) => session.id)
+    set({ sessions })
+  },
+
+  createSession: async () => {
+    const result = await createChatSession()
+    const session: Session = {
+      id: result.session_id,
+      title: 'New Chat',
+      messageCount: 0,
+      updatedAt: Date.now(),
+    }
+    set((state) => ({
+      sessions: [session, ...state.sessions.filter((item) => item.id !== session.id)],
+      currentSessionId: session.id,
+      messages: [],
+      error: null,
+    }))
+    return session.id
+  },
+
+  setCurrentSession: async (id: string) => {
+    set({ currentSessionId: id, isLoading: true, error: null })
     try {
-      const session = await getChatHistory(get().sessionId)
-      if (session?.messages?.length) {
-        const hydrated: ChatMessage[] = session.messages.map((m, i) => ({
-          id: `hydrated_${i}`,
-          role: (m.role as 'user' | 'assistant'),
-          content: m.content,
-          timestamp: new Date(m.timestamp || Date.now()),
-          citations: m.citations as Citation[] | undefined,
-          confidence: m.confidence as number | undefined,
-          modelUsed: m.model_used as string | undefined,
-          provider: m.provider as string | undefined,
-          queryTimeMs: m.query_time_ms as number | undefined,
-          documentsRetrieved: m.documents_retrieved as number | undefined,
-          isInsufficient: m.is_insufficient as boolean | undefined,
-        }))
-        set({ messages: hydrated, isHydrated: true })
-      } else {
-        set({ isHydrated: true })
-      }
-    } catch {
-      // Backend might be offline — that's fine, proceed with empty state
-      set({ isHydrated: true })
+      const records = await getChatMessages(id)
+      set({
+        messages: records.map(normalizeMessage),
+        isLoading: false,
+      })
+    } catch (error) {
+      set({ isLoading: false, error: errorToMessage(error), messages: [] })
     }
   },
 
-  sendMessage: async (question: string, options) => {
-    const sessionId = get().sessionId
-    const userMessage: ChatMessage = {
-      id: generateId(),
+  sendMessage: async (query: string) => {
+    const trimmed = query.trim()
+    if (!trimmed) return
+
+    let sessionId = get().currentSessionId
+    if (!sessionId) {
+      sessionId = await get().createSession()
+    }
+
+    const optimistic: Message = {
+      id: `local_user_${Date.now()}`,
       role: 'user',
-      content: question,
-      timestamp: new Date(),
+      content: trimmed,
+      createdAt: Date.now(),
     }
 
     set((state) => ({
-      messages: [...state.messages, userMessage],
+      messages: [...state.messages, optimistic],
       isLoading: true,
       error: null,
     }))
 
-    // Persist user message (fire-and-forget)
-    saveChatMessage({
-      session_id: sessionId,
-      role: 'user',
-      content: question,
-    }).catch(() => {})
-
     try {
-      const response: QueryResponse = await queryDocuments({
-        question,
-        use_fallback: options?.use_fallback ?? true,
-        equipment_type: options?.equipment_type,
-        voltage_level: options?.voltage_level,
-        doc_types: options?.doc_types,
-      })
-
-      const assistantMessage: ChatMessage = {
-        id: generateId(),
+      const response = await queryRag(trimmed, sessionId)
+      const assistant: Message = {
+        id: `local_assistant_${Date.now()}`,
         role: 'assistant',
         content: response.answer,
-        timestamp: new Date(),
         citations: response.citations,
-        confidence: response.confidence,
-        modelUsed: response.model_used,
-        provider: response.provider,
-        queryTimeMs: response.query_time_ms,
-        documentsRetrieved: response.documents_retrieved,
-        isInsufficient: response.is_insufficient,
+        createdAt: Date.now(),
+        llmProvider: response.llm_provider,
+        durationMs: response.duration_ms,
       }
-
       set((state) => ({
-        messages: [...state.messages, assistantMessage],
+        messages: [...state.messages, assistant],
+        currentSessionId: response.session_id,
         isLoading: false,
       }))
-
-      // Persist assistant message (fire-and-forget)
-      saveChatMessage({
-        session_id: sessionId,
-        role: 'assistant',
-        content: response.answer,
-        citations: response.citations,
-        confidence: response.confidence,
-        model_used: response.model_used,
-        provider: response.provider,
-        query_time_ms: response.query_time_ms,
-        documents_retrieved: response.documents_retrieved,
-        is_insufficient: response.is_insufficient,
-      }).catch(() => {})
-
-    } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: { message?: string } } }; message?: string }
-      const errorMsg = error?.response?.data?.detail?.message || error?.message || 'Failed to get response'
-
-      const errorMessage: ChatMessage = {
-        id: generateId(),
-        role: 'assistant',
-        content: `⚠️ Error: ${errorMsg}. Please check that the backend server is running.`,
-        timestamp: new Date(),
-        isInsufficient: true,
-      }
-
+      void get().loadSessions()
+    } catch (error) {
       set((state) => ({
-        messages: [...state.messages, errorMessage],
+        messages: state.messages.filter((message) => message.id !== optimistic.id),
         isLoading: false,
-        error: errorMsg,
+        error: errorToMessage(error),
       }))
     }
   },
 
-  clearChat: () => {
-    // New session on clear
-    const newId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    sessionStorage.setItem(SESSION_KEY, newId)
-    set({ messages: [], error: null, sessionId: newId, isHydrated: true })
-  },
+  clearError: () => set({ error: null }),
 }))

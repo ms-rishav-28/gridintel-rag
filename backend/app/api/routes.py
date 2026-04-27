@@ -247,6 +247,13 @@ async def list_chat_sessions() -> list[dict]:
     return await get_convex_service().list_sessions()
 
 
+@router.get("/chat/sessions/{session_id}/messages")
+async def get_chat_session_messages(session_id: str, n: int = 100) -> list[dict]:
+    # CODEX-FIX: expose Convex-backed message restore for the React chat store.
+    messages = await get_convex_service().get_last_n_messages(session_id, n)
+    return list(reversed(messages))
+
+
 @router.delete("/chat/sessions/{session_id}")
 async def delete_chat_session(session_id: str) -> dict[str, bool]:
     await get_convex_service().delete_session(session_id)

@@ -1,281 +1,258 @@
-import axios from 'axios'
+// CODEX-FIX: align frontend HTTP client with secured FastAPI RAG endpoints and typed responses.
+
+import axios, { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios'
 import toast from 'react-hot-toast'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
-const API_KEY = import.meta.env.VITE_BACKEND_API_KEY
+const API_KEY = import.meta.env.VITE_BACKEND_API_KEY as string | undefined
+const RETRY_DELAYS_MS = [2000, 4000, 8000] as const
+
+interface RetryRequestConfig extends InternalAxiosRequestConfig {
+  __retryCount?: number
+}
+
+interface ApiErrorPayload {
+  detail?: unknown
+  message?: string
+  error_code?: string
+}
+
+function createRequestId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function extractErrorMessage(payload: ApiErrorPayload | undefined): string {
+  const detail = payload?.detail
+  if (typeof detail === 'string') return detail
+  if (isRecord(detail) && typeof detail.message === 'string') return detail.message
+  if (payload?.message) return payload.message
+  return 'Request failed'
+}
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
-  headers: {
-    'Content-Type': 'application/json',
-    ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
-  },
-  timeout: 120000, // 120 seconds — LLM + embedding can be slow on cold start
+  timeout: 180000,
 })
 
-// Response interceptor for error handling
+api.interceptors.request.use((config) => {
+  const headers = AxiosHeaders.from(config.headers)
+  headers.set('X-Request-ID', createRequestId())
+  if (API_KEY) headers.set('X-API-Key', API_KEY)
+  config.headers = headers
+  return config
+})
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    const message = error.response?.data?.detail?.message
-      || error.response?.data?.message
-      || error.message
-      || 'An error occurred'
-    const errorCode = error.response?.data?.detail?.error_code
-      || error.response?.data?.error_code
+  async (error: AxiosError<ApiErrorPayload>) => {
+    const response = error.response
+    const config = error.config as RetryRequestConfig | undefined
 
-    // Don't show toast for query or chat endpoints (handled by components)
-    const silentPaths = ['/query', '/chat/', '/settings']
-    const isSilent = silentPaths.some((p) => error.config?.url?.includes(p))
-
-    if (!isSilent) {
-      toast.error(`${errorCode ? `[${errorCode}] ` : ''}${message}`)
+    if (response?.status === 503 && config) {
+      const retryCount = config.__retryCount ?? 0
+      if (retryCount < RETRY_DELAYS_MS.length) {
+        config.__retryCount = retryCount + 1
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[retryCount]))
+        return api.request(config)
+      }
+      toast.error('Backend is starting up...')
+    } else if (response?.status === 401) {
+      toast.error('API key invalid or missing')
+    } else if (response?.status === 429) {
+      const retryAfter = String(response.headers['retry-after'] ?? '')
+      toast.error(`Rate limit - retry in ${retryAfter || 'a few'}s`)
+    } else if (response && response.status >= 500) {
+      toast.error('Server error. Check backend logs.')
+    } else if (response && response.status >= 400) {
+      toast.error(extractErrorMessage(response.data))
     }
 
     return Promise.reject(error)
-  }
+  },
 )
 
-// ═══════════════════════════════════════════════════════════════════
-//  TYPE DEFINITIONS
-// ═══════════════════════════════════════════════════════════════════
+export type SourceType = 'pdf' | 'docx' | 'txt' | 'webpage'
+export type IngestionStatus = 'pending' | 'processing' | 'done' | 'failed'
+export type ChatRole = 'user' | 'assistant'
 
-export interface QueryRequest {
-  question: string
-  equipment_type?: string
-  voltage_level?: string
-  doc_types?: string[]
-  use_fallback?: boolean
+export interface RAGFilters {
+  doc_ids?: string[]
+  source_type?: SourceType
 }
 
 export interface Citation {
-  source: string
-  doc_type: string
-  page: string
-  chunk_index: number
-  relevance_score: number
-  equipment_type?: string
-  voltage_level?: string
-  text_preview: string
+  docId: string
+  docName: string
+  pageNumber?: number | null
+  chunkIndex?: number | null
+  relevanceScore?: number | null
+  chunkPreview?: string | null
+  isImageChunk?: boolean | null
 }
 
-export interface QueryResponse {
+export interface RAGResponse {
   answer: string
   citations: Citation[]
-  confidence: number
-  model_used: string
-  provider: string
-  query_time_ms: number
-  documents_retrieved: number
-  is_insufficient: boolean
+  session_id: string
+  llm_provider: string
+  duration_ms: number
 }
 
-export interface DocumentUploadResponse {
+export interface UploadResult {
   doc_id: string
-  filename: string
-  doc_type: string
-  chunks_processed: number
-  file_hash: string
-  equipment_type?: string
-  voltage_level?: string
-  status: string
+  job_id: string
+  status: 'processing'
 }
 
-export interface UrlIngestionRequest {
-  url: string
-  doc_type?: string
-  equipment_type?: string
-  voltage_level?: string
+export interface Job {
+  _id?: string
+  jobId: string
+  docId?: string
+  sourceType: string
+  sourceUrl?: string
+  status: IngestionStatus
+  progressMessage?: string
+  errorMessage?: string
+  totalChunks?: number
+  processedChunks?: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface DocumentRecord {
+  _id?: string
+  docId: string
+  name: string
+  sourceType: SourceType
+  sourceUrl?: string
+  storageId?: string
+  fileSizeBytes?: number
+  chunkCount?: number
+  imageCount?: number
+  sha256?: string
+  ingestionStatus: IngestionStatus
+  errorMessage?: string
+  createdAt: number
+  updatedAt: number
 }
 
 export interface HealthResponse {
-  status: string
+  status: 'healthy' | 'degraded'
   version: string
-  vector_store: {
-    total_documents: number
-    collection_name: string
-    embedding_model: string
-    status?: string
-    error?: string
+  components: {
+    lancedb?: {
+      status: string
+      row_count: number
+      path: string
+      size_bytes?: number
+    }
+    convex?: { status: string }
+    embedding_model?: { status: string; model: string }
+    vision_model?: { status: string; model: string }
+    llm?: { status: string; last_provider?: string | null }
   }
-  llm_provider: string
-  llm_model: string
-  persistence_connected: boolean
 }
 
-export interface DocumentListItem {
-  doc_id: string
-  filename: string
-  doc_type: string
-  equipment_type?: string | null
-  voltage_level?: string | null
-  chunks_count: number
-  uploaded_at?: string
-}
-
-export interface ChatMessagePayload {
-  session_id: string
-  role: string
-  content: string
-  timestamp?: string
-  citations?: Citation[]
-  confidence?: number
-  model_used?: string
-  provider?: string
-  query_time_ms?: number
-  documents_retrieved?: number
-  is_insufficient?: boolean
+export interface Settings {
+  llmProvider?: string
+  llmModel?: string
+  embeddingModel?: string
+  enableVision?: boolean
+  enableBrowserIngestion?: boolean
+  systemPromptOverride?: string
 }
 
 export interface ChatSession {
-  session_id: string
-  created_at?: string
-  updated_at?: string
-  messages: ChatMessagePayload[]
+  _id?: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  messageCount: number
+  userId?: string
 }
 
-export interface UserSettings {
-  theme?: string
-  notifications?: { critical: boolean; insights: boolean }
-  profile?: { name?: string; designation?: string; email?: string }
+export interface ChatMessageRecord {
+  _id?: string
+  sessionId?: string
+  role: ChatRole
+  content: string
+  citations?: Citation[]
+  llmProvider?: string
+  durationMs?: number
+  createdAt: number
 }
 
-export interface MetadataOption {
-  value: string
-  label: string
-}
-
-export interface MetadataOptionsResponse {
-  equipment_types: MetadataOption[]
-  voltage_levels: MetadataOption[]
-  document_types: MetadataOption[]
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  RAG QUERY
-// ═══════════════════════════════════════════════════════════════════
-
-export async function queryDocuments(request: QueryRequest): Promise<QueryResponse> {
-  const response = await api.post<QueryResponse>('/query', request)
-  return response.data
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  DOCUMENT MANAGEMENT
-// ═══════════════════════════════════════════════════════════════════
-
-export async function uploadDocument(
-  file: File,
-  metadata?: {
-    doc_type?: string
-    equipment_type?: string
-    voltage_level?: string
-  }
-): Promise<DocumentUploadResponse> {
+export async function uploadFile(file: File): Promise<UploadResult> {
   const formData = new FormData()
   formData.append('file', file)
+  const response = await api.post<UploadResult>('/documents/upload', formData)
+  return response.data
+}
 
-  if (metadata?.doc_type) formData.append('doc_type', metadata.doc_type)
-  if (metadata?.equipment_type) formData.append('equipment_type', metadata.equipment_type)
-  if (metadata?.voltage_level) formData.append('voltage_level', metadata.voltage_level)
+export async function uploadUrl(url: string): Promise<UploadResult> {
+  const response = await api.post<UploadResult>('/documents/upload-url', { url })
+  return response.data
+}
 
-  const response = await api.post<DocumentUploadResponse>('/documents/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
+export async function queryRag(
+  query: string,
+  sessionId?: string,
+  filters?: RAGFilters,
+): Promise<RAGResponse> {
+  const response = await api.post<RAGResponse>('/query', {
+    query,
+    session_id: sessionId,
+    filters,
   })
   return response.data
 }
 
-export async function uploadDocumentFromUrl(
-  payload: UrlIngestionRequest,
-): Promise<DocumentUploadResponse> {
-  const response = await api.post<DocumentUploadResponse>('/documents/upload-url', payload)
+export async function getJob(jobId: string): Promise<Job> {
+  const response = await api.get<Job>(`/jobs/${jobId}`)
   return response.data
 }
 
-export async function uploadMultipleDocuments(files: File[]): Promise<{
-  processed: number
-  failed: number
-  documents: DocumentUploadResponse[]
-  errors: { file: string; error: string }[]
-}> {
-  const formData = new FormData()
-  files.forEach((file) => formData.append('files', file))
-
-  const response = await api.post('/documents/batch-upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+export async function listDocuments(): Promise<DocumentRecord[]> {
+  const response = await api.get<DocumentRecord[]>('/documents')
   return response.data
 }
 
-export async function listDocuments(): Promise<{ documents: DocumentListItem[]; total: number }> {
-  const response = await api.get('/documents/list')
-  return response.data
+export async function deleteDocument(docId: string): Promise<void> {
+  await api.delete(`/documents/${docId}`)
 }
-
-export async function deleteDocument(docId: string): Promise<{ status: string; message: string }> {
-  const response = await api.delete(`/documents/${docId}`)
-  return response.data
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  CHAT PERSISTENCE
-// ═══════════════════════════════════════════════════════════════════
-
-export async function saveChatMessage(payload: ChatMessagePayload): Promise<void> {
-  await api.post('/chat/message', payload)
-}
-
-export async function getChatHistory(sessionId: string): Promise<ChatSession> {
-  const response = await api.get<ChatSession>(`/chat/history/${sessionId}`)
-  return response.data
-}
-
-export async function listChatSessions(): Promise<{ sessions: { session_id: string; message_count: number }[] }> {
-  const response = await api.get('/chat/sessions')
-  return response.data
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  USER SETTINGS
-// ═══════════════════════════════════════════════════════════════════
-
-export async function getUserSettings(): Promise<UserSettings> {
-  const response = await api.get<UserSettings>('/settings')
-  return response.data
-}
-
-export async function saveUserSettings(settings: UserSettings): Promise<void> {
-  await api.post('/settings', settings)
-}
-
-// ═══════════════════════════════════════════════════════════════════
-//  HEALTH & STATS
-// ═══════════════════════════════════════════════════════════════════
 
 export async function getHealth(): Promise<HealthResponse> {
   const response = await api.get<HealthResponse>('/health')
   return response.data
 }
 
-export async function getStats(): Promise<{
-  vector_store: {
-    total_documents: number
-    collection_name: string
-    embedding_model: string
-  }
-  configuration: {
-    chunk_size: number
-    chunk_overlap: number
-    embedding_model: string
-    llm_provider: string
-    llm_model: string
-  }
-}> {
-  const response = await api.get('/stats')
+export async function getSettings(): Promise<Settings> {
+  const response = await api.get<Settings>('/settings')
   return response.data
 }
 
-export async function getMetadataOptions(): Promise<MetadataOptionsResponse> {
-  const response = await api.get<MetadataOptionsResponse>('/metadata/options')
+export async function saveSettings(settings: Partial<Settings>): Promise<void> {
+  await api.post('/settings', settings)
+}
+
+export async function createChatSession(): Promise<{ session_id: string }> {
+  const response = await api.post<{ session_id: string }>('/chat/sessions')
+  return response.data
+}
+
+export async function listChatSessions(): Promise<ChatSession[]> {
+  const response = await api.get<ChatSession[]>('/chat/sessions')
+  return response.data
+}
+
+export async function getChatMessages(sessionId: string): Promise<ChatMessageRecord[]> {
+  const response = await api.get<ChatMessageRecord[]>(`/chat/sessions/${sessionId}/messages`)
   return response.data
 }

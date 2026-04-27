@@ -1,604 +1,234 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import {
-  getMetadataOptions,
-  getChatHistory,
-  queryDocuments,
-  saveChatMessage,
-  type Citation,
-  type MetadataOptionsResponse,
-} from '../lib/api'
-import { formatConfidence, formatDuration } from '../lib/utils'
+// CODEX-FIX: rebuild chat UI around persisted sessions, optimistic sending, and citation cards.
 
-interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  content: string
-  timestamp: Date
-  citations?: Citation[]
-  confidence?: number
-  modelUsed?: string
-  provider?: string
-  queryTimeMs?: number
-  documentsRetrieved?: number
-  isInsufficient?: boolean
-}
+import { FormEvent, useEffect, useRef, useState } from 'react'
+import { Bot, Database, FileText, Image as ImageIcon, Loader2, Plus, Send } from 'lucide-react'
+import { useChatStore, type Message, type Session } from '../stores/chatStore'
+import { formatDuration } from '../lib/utils'
 
-const SESSION_KEY = 'powergrid_session_id'
-const CHAT_PREFILL_KEY = 'powergrid_chat_prefill'
-
-function getOrCreateSessionId() {
-  const existing = sessionStorage.getItem(SESSION_KEY)
-  if (existing) return existing
-
-  const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-  sessionStorage.setItem(SESSION_KEY, sessionId)
-  return sessionId
-}
-
-function createNewSessionId() {
-  const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-  sessionStorage.setItem(SESSION_KEY, sessionId)
-  return sessionId
-}
+const EXAMPLES = [
+  'Summarize the latest CERC transmission planning guidance in the repository.',
+  'Which uploaded documents mention protection relay testing?',
+  'Find diagrams or scanned tables related to substation maintenance.',
+]
 
 const Chat = () => {
-  const navigate = useNavigate()
-  const [sessionId, setSessionId] = useState(() => getOrCreateSessionId())
-  const [inputValue, setInputValue] = useState('')
-  const [selectedEquipment, setSelectedEquipment] = useState('')
-  const [selectedVoltage, setSelectedVoltage] = useState('')
-  const [selectedDocTypes, setSelectedDocTypes] = useState<string[]>([])
-  const [useFallback, setUseFallback] = useState(true)
-  const [showFilters, setShowFilters] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [metadataOptions, setMetadataOptions] = useState<MetadataOptionsResponse | null>(null)
-  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false)
-
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-
-  useEffect(() => {
-    const prefill = sessionStorage.getItem(CHAT_PREFILL_KEY)
-    if (!prefill) return
-
-    setInputValue(prefill)
-    sessionStorage.removeItem(CHAT_PREFILL_KEY)
-  }, [])
+  const {
+    sessions,
+    currentSessionId,
+    messages,
+    isLoading,
+    error,
+    loadSessions,
+    createSession,
+    setCurrentSession,
+    sendMessage,
+    clearError,
+  } = useChatStore()
+  const [draft, setDraft] = useState('')
+  const endRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const loadMetadata = async () => {
-      try {
-        setIsLoadingMetadata(true)
-        const options = await getMetadataOptions()
-        setMetadataOptions(options)
-      } catch {
-        setMetadataOptions(null)
-      } finally {
-        setIsLoadingMetadata(false)
+    const boot = async () => {
+      await loadSessions()
+      const latest = useChatStore.getState().sessions[0]
+      if (latest) {
+        await setCurrentSession(latest.id)
+      } else {
+        await createSession()
       }
     }
-    loadMetadata()
-  }, [])
+    void boot()
+  }, [createSession, loadSessions, setCurrentSession])
 
   useEffect(() => {
-    let cancelled = false
-
-    const loadChatHistory = async () => {
-      try {
-        const session = await getChatHistory(sessionId)
-        if (cancelled) return
-
-        const history = (session?.messages ?? []).map((message, index) => ({
-          id: `${message.timestamp || 'ts'}_${index}`,
-          role: message.role as 'user' | 'assistant',
-          content: message.content,
-          timestamp: new Date(message.timestamp || Date.now()),
-          citations: (message.citations as Citation[] | undefined) ?? [],
-          confidence: message.confidence,
-          modelUsed: message.model_used,
-          provider: message.provider,
-          queryTimeMs: message.query_time_ms,
-          documentsRetrieved: message.documents_retrieved,
-          isInsufficient: message.is_insufficient,
-        }))
-
-        setMessages(history)
-      } catch {
-        if (!cancelled) {
-          setMessages([])
-        }
-      }
-    }
-
-    void loadChatHistory()
-
-    return () => {
-      cancelled = true
-    }
-  }, [sessionId])
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages, isLoading])
 
-  const latestAssistant = useMemo(
-    () => [...messages].reverse().find((m) => m.role === 'assistant' && m.citations && m.citations.length > 0),
-    [messages],
-  )
-
-  const activeFiltersCount =
-    (selectedEquipment ? 1 : 0) +
-    (selectedVoltage ? 1 : 0) +
-    (selectedDocTypes.length > 0 ? 1 : 0) +
-    (useFallback ? 1 : 0)
-
-  const handleDocTypeToggle = (value: string) => {
-    setSelectedDocTypes((prev) =>
-      prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value],
-    )
-  }
-
-  const handleSubmit = async () => {
-    const question = inputValue.trim()
-    if (!question || isLoading) return
-
-    const timestamp = new Date().toISOString()
-    const userMessage: ChatMessage = {
-      id: `${timestamp}_user`,
-      role: 'user',
-      content: question,
-      timestamp: new Date(timestamp),
-    }
-
-    setMessages((prev) => [...prev, userMessage])
-    setInputValue('')
-    setIsLoading(true)
-
-    await saveChatMessage({
-      session_id: sessionId,
-      role: 'user',
-      content: question,
-      timestamp,
-    }).catch(() => {})
-
-    try {
-      const response = await queryDocuments({
-        question,
-        equipment_type: selectedEquipment || undefined,
-        voltage_level: selectedVoltage || undefined,
-        doc_types: selectedDocTypes.length > 0 ? selectedDocTypes : undefined,
-        use_fallback: useFallback,
-      })
-
-      const assistantMessage: ChatMessage = {
-        id: `${Date.now()}_assistant`,
-        role: 'assistant',
-        content: response.answer,
-        timestamp: new Date(),
-        citations: response.citations,
-        confidence: response.confidence,
-        modelUsed: response.model_used,
-        provider: response.provider,
-        queryTimeMs: response.query_time_ms,
-        documentsRetrieved: response.documents_retrieved,
-        isInsufficient: response.is_insufficient,
-      }
-      setMessages((prev) => [...prev, assistantMessage])
-
-      await saveChatMessage({
-        session_id: sessionId,
-        role: 'assistant',
-        content: response.answer,
-        timestamp: new Date().toISOString(),
-        citations: response.citations,
-        confidence: response.confidence,
-        model_used: response.model_used,
-        provider: response.provider,
-        query_time_ms: response.query_time_ms,
-        documents_retrieved: response.documents_retrieved,
-        is_insufficient: response.is_insufficient,
-      }).catch(() => {})
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to get response from backend.'
-      const assistantErrorMessage: ChatMessage = {
-        id: `${Date.now()}_assistant_error`,
-        role: 'assistant',
-        content: `⚠️ Error: ${message}`,
-        timestamp: new Date(),
-        isInsufficient: true,
-      }
-      setMessages((prev) => [...prev, assistantErrorMessage])
-
-      await saveChatMessage({
-        session_id: sessionId,
-        role: 'assistant',
-        content: `⚠️ Error: ${message}`,
-        timestamp: new Date().toISOString(),
-      }).catch(() => {})
-    } finally {
-      setIsLoading(false)
-      inputRef.current?.focus()
-    }
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      void handleSubmit()
-    }
-  }
-
-  const handleClearSession = () => {
-    const nextSessionId = createNewSessionId()
-    setSessionId(nextSessionId)
-    setMessages([])
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault()
+    const query = draft.trim()
+    if (!query || isLoading) return
+    setDraft('')
+    await sendMessage(query)
   }
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] flex-col lg:flex-row">
-      <section className="flex min-h-0 flex-1 flex-col">
-        <div className="border-b border-blue-100 bg-surface-container-low px-4 py-4 md:px-8">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={() => setShowFilters((prev) => !prev)}
-              className="flex items-center gap-2 rounded-lg bg-surface-container-lowest px-3 py-2 text-sm font-semibold text-primary transition-colors hover:bg-blue-50"
-            >
-              <span className="material-symbols-outlined text-base">tune</span>
-              Retrieval Filters
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs">{activeFiltersCount}</span>
-            </button>
-            <button
-              onClick={() => {
-                setSelectedEquipment('')
-                setSelectedVoltage('')
-                setSelectedDocTypes([])
-                setUseFallback(true)
-              }}
-              className="rounded-lg px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high"
-            >
-              Reset Filters
-            </button>
-            <div className="ml-auto text-xs text-on-surface-variant">
-              {isLoadingMetadata ? 'Loading metadata options...' : 'Filters apply to next query'}
-            </div>
-          </div>
+    <div className="grid min-h-[calc(100vh-4rem)] grid-cols-1 bg-surface lg:grid-cols-[280px_minmax(0,1fr)]">
+      <aside className="border-b border-outline-variant/40 bg-surface-container-low p-4 lg:border-b-0 lg:border-r">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="font-label text-xs font-bold uppercase tracking-widest text-on-surface-variant">Sessions</h2>
+          <button
+            type="button"
+            onClick={() => void createSession()}
+            className="rounded-lg p-2 text-primary hover:bg-surface-container-high"
+            title="New chat"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
 
-          {showFilters && (
-            <div className="mt-4 grid gap-4 rounded-xl border border-blue-100 bg-surface-container-lowest p-4 md:grid-cols-2">
-              <label className="space-y-2 text-sm">
-                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Equipment Type</span>
-                <select
-                  value={selectedEquipment}
-                  onChange={(e) => setSelectedEquipment(e.target.value)}
-                  className="w-full rounded-lg border border-outline-variant bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
-                >
-                  <option value="">Any equipment</option>
-                  {(metadataOptions?.equipment_types || []).map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="space-y-2 text-sm">
-                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Voltage Level</span>
-                <select
-                  value={selectedVoltage}
-                  onChange={(e) => setSelectedVoltage(e.target.value)}
-                  className="w-full rounded-lg border border-outline-variant bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
-                >
-                  <option value="">Any voltage level</option>
-                  {(metadataOptions?.voltage_levels || []).map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="space-y-2 md:col-span-2">
-                <span className="block font-label text-[10px] uppercase tracking-widest text-on-surface-variant">Document Types</span>
-                <div className="flex flex-wrap gap-2">
-                  {(metadataOptions?.document_types || []).map((option) => {
-                    const active = selectedDocTypes.includes(option.value)
-                    return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => handleDocTypeToggle(option.value)}
-                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
-                          active
-                            ? 'bg-primary text-on-primary'
-                            : 'bg-surface-container-high text-on-surface-variant hover:bg-blue-100'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <label className="flex items-center gap-3 md:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={useFallback}
-                  onChange={(e) => setUseFallback(e.target.checked)}
-                  className="h-4 w-4 rounded border-outline-variant text-primary focus:ring-primary"
-                />
-                <span className="text-sm text-on-surface-variant">
-                  Enable fallback retrieval when strict filters return insufficient context
-                </span>
-              </label>
-            </div>
+        <div className="space-y-2">
+          {sessions.map((session) => (
+            <SessionButton
+              key={session.id}
+              session={session}
+              active={session.id === currentSessionId}
+              onClick={() => void setCurrentSession(session.id)}
+            />
+          ))}
+          {sessions.length === 0 && (
+            <p className="rounded-lg border border-dashed border-outline-variant p-4 text-sm text-on-surface-variant">
+              No sessions yet.
+            </p>
           )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
-          <div className="space-y-8 pb-20">
-            {messages.length === 0 && !isLoading && (
-              <div className="flex min-h-[40vh] flex-col items-center justify-center text-center opacity-70">
-                <span className="material-symbols-outlined mb-5 text-6xl text-primary/30">smart_toy</span>
-                <h3 className="mb-2 text-2xl font-bold text-on-surface/60">GridIntel Assistant</h3>
-                <p className="max-w-lg text-on-surface-variant">
-                  Ask safety-critical questions about POWERGRID maintenance protocols, CEA standards, and technical manuals.
-                </p>
-                <div className="mt-7 flex flex-wrap justify-center gap-3">
-                  {[
-                    'What is the maintenance interval for a 220 kV circuit breaker?',
-                    'Safety procedures for transformer oil testing?',
-                    'CEA guideline on transmission line inspection?',
-                  ].map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      onClick={() => {
-                        setInputValue(suggestion)
-                        inputRef.current?.focus()
-                      }}
-                      className="rounded-xl bg-surface-container-low px-4 py-2 text-left text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high"
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {messages.map((msg) => (
-              <div key={msg.id}>{msg.role === 'user' ? <UserBubble message={msg} /> : <AssistantBubble message={msg} />}</div>
-            ))}
-
-            {isLoading && (
-              <div className="flex max-w-4xl flex-col items-start">
-                <div className="mb-2 flex items-center gap-3 px-1">
-                  <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-white">
-                    <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>
-                      smart_toy
-                    </span>
-                  </div>
-                  <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">GridIntel Analyzing</span>
-                </div>
-                <div className="w-full max-w-xl rounded-2xl rounded-tl-none bg-surface-container-lowest p-6 shadow-sm ring-1 ring-blue-100/50">
-                  <div className="flex items-center gap-3">
-                    <div className="flex gap-1">
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '0ms' }}></span>
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '150ms' }}></span>
-                      <span className="h-2 w-2 animate-bounce rounded-full bg-primary" style={{ animationDelay: '300ms' }}></span>
-                    </div>
-                    <span className="text-sm text-on-surface-variant">Retrieving documents and generating a response...</span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
-
-        <div className="sticky bottom-0 border-t border-blue-100 bg-gradient-to-t from-surface via-surface to-surface/90 px-4 py-4 md:px-8 md:py-6">
-          <div className="mx-auto max-w-5xl">
-            <div className="rounded-2xl bg-surface-container-lowest p-2 shadow-lg ring-2 ring-blue-100 transition-all focus-within:ring-primary">
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => navigate('/knowledge-base')}
-                  className="rounded-xl p-3 text-slate-400 transition-colors hover:text-primary"
-                  aria-label="Attach file"
-                  title="Open Knowledge Base upload"
-                >
-                  <span className="material-symbols-outlined">attach_file</span>
-                </button>
-                <input
-                  ref={inputRef}
-                  className="flex-1 border-none bg-transparent px-2 py-3 text-on-surface placeholder:text-slate-400 focus:ring-0"
-                  placeholder="Ask GridIntel about maintenance, safety, or standards..."
-                  type="text"
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  disabled={isLoading}
-                />
-                <button
-                  onClick={() => void handleSubmit()}
-                  disabled={isLoading || !inputValue.trim()}
-                  className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary text-on-primary shadow-md transition-all active:scale-90 disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label="Send message"
-                >
-                  <span className="material-symbols-outlined">{isLoading ? 'hourglass_top' : 'send'}</span>
-                </button>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap justify-center gap-4">
-              <button
-                onClick={() => {
-                  setInputValue('Show recent maintenance queries')
-                  inputRef.current?.focus()
-                }}
-                className="flex items-center gap-1 text-[10px] font-label uppercase tracking-widest text-slate-400 transition-colors hover:text-primary"
-              >
-                <span className="material-symbols-outlined text-xs">history</span>
-                Recent queries
-              </button>
-              <button
-                onClick={() => {
-                  setInputValue('List available site manuals')
-                  inputRef.current?.focus()
-                }}
-                className="flex items-center gap-1 text-[10px] font-label uppercase tracking-widest text-slate-400 transition-colors hover:text-primary"
-              >
-                <span className="material-symbols-outlined text-xs">book</span>
-                Site manuals
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <aside className="w-full border-t border-blue-100 bg-surface-container-low p-5 lg:w-80 lg:border-l lg:border-t-0 lg:p-6">
-        <div className="space-y-6 lg:sticky lg:top-20">
-          <div>
-            <h3 className="mb-4 font-label text-xs font-bold uppercase tracking-widest text-slate-500">Referenced Documents</h3>
-            {latestAssistant?.citations && latestAssistant.citations.length > 0 ? (
-              <div className="space-y-3">
-                {latestAssistant.citations.map((citation, index) => (
-                  <div
-                    key={`${citation.source}_${citation.chunk_index}_${index}`}
-                    className={`rounded-xl border-l-4 bg-surface-container-lowest p-4 shadow-sm ${
-                      index === 0 ? 'border-primary' : 'border-secondary'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="material-symbols-outlined text-primary">description</span>
-                      <span className="rounded bg-blue-50 px-2 py-0.5 font-label text-[10px] text-blue-600">
-                        {citation.doc_type}
-                      </span>
-                    </div>
-                    <h4 className="mt-2 text-sm font-bold text-blue-900">{citation.source}</h4>
-                    <p className="mt-1 line-clamp-2 text-[11px] text-slate-500">{citation.text_preview}</p>
-                    <div className="mt-2 flex items-center justify-between">
-                      <span className="text-[10px] font-label text-outline">Score: {formatConfidence(citation.relevance_score)}</span>
-                      <span className="text-[10px] font-label text-outline">Page {citation.page}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs italic text-on-surface-variant">Ask a question to view source citations.</p>
-            )}
-          </div>
-
-          <div>
-            <h3 className="mb-4 font-label text-xs font-bold uppercase tracking-widest text-slate-500">Session Info</h3>
-            <div className="rounded-xl bg-primary p-4 text-on-primary">
-              <div className="mb-2 flex items-center gap-2">
-                <span className="material-symbols-outlined text-sm">database</span>
-                <span className="font-label text-xs uppercase">Chat Session</span>
-              </div>
-              <p className="mb-3 text-sm font-medium">{messages.length} messages in this session.</p>
-              {latestAssistant?.queryTimeMs && (
-                <p className="text-[10px] opacity-90">Last query time: {formatDuration(latestAssistant.queryTimeMs)}</p>
-              )}
-              {messages.length > 0 && (
-                <button
-                  onClick={handleClearSession}
-                  className="mt-3 w-full rounded-lg bg-on-primary/10 py-1.5 text-xs font-bold text-on-primary transition-colors hover:bg-on-primary/20"
-                >
-                  Clear Session
-                </button>
-              )}
-            </div>
-          </div>
         </div>
       </aside>
-    </div>
-  )
-}
 
-function UserBubble({ message }: { message: ChatMessage }) {
-  return (
-    <div className="ml-auto flex w-full max-w-3xl flex-col items-end">
-      <div className="mb-2 flex items-center gap-3 px-1">
-        <span className="font-label text-[10px] uppercase tracking-widest text-slate-400">
-          User Request • {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-        </span>
-      </div>
-      <div className="rounded-2xl rounded-tr-none bg-surface-container-highest p-6 text-on-surface shadow-sm ring-1 ring-outline-variant/10">
-        <p className="leading-relaxed">{message.content}</p>
-      </div>
-    </div>
-  )
-}
-
-function AssistantBubble({ message }: { message: ChatMessage }) {
-  return (
-    <div className="flex w-full max-w-4xl flex-col items-start">
-      <div className="mb-2 flex flex-wrap items-center gap-3 px-1">
-        <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-white">
-          <span className="material-symbols-outlined text-xs" style={{ fontVariationSettings: "'FILL' 1" }}>
-            smart_toy
-          </span>
+      <section className="flex min-h-0 flex-col">
+        <div className="border-b border-outline-variant/40 bg-surface-container-lowest px-4 py-3 md:px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-on-primary">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div>
+              <h1 className="text-base font-bold text-on-surface">POWERGRID SmartOps Assistant</h1>
+              <p className="text-xs text-on-surface-variant">Hybrid retrieval with Convex history and LanceDB context</p>
+            </div>
+          </div>
         </div>
-        <span className="font-label text-[10px] font-bold uppercase tracking-widest text-primary">
-          GridIntel Analysis • {new Date(message.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-        </span>
-        {message.confidence !== undefined && (
-          <span className="font-label text-[10px] uppercase text-secondary">Confidence: {formatConfidence(message.confidence)}</span>
-        )}
-      </div>
 
-      <div className="w-full space-y-5 rounded-2xl rounded-tl-none bg-surface-container-lowest p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-blue-100/50">
-        <div className="prose prose-sm max-w-none text-on-surface">
-          {message.content.split('\n').map((paragraph, index) =>
-            paragraph.trim() ? (
-              <p key={index} className="mb-2 leading-relaxed">
-                {paragraph}
-              </p>
-            ) : null,
+        {error && (
+          <div className="mx-4 mt-4 flex items-center justify-between rounded-lg border border-error/30 bg-error-container px-4 py-3 text-sm text-on-error-container md:mx-6">
+            <span>{error}</span>
+            <button type="button" onClick={clearError} className="font-semibold">Dismiss</button>
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto px-4 py-5 md:px-6">
+          {messages.length === 0 && !isLoading ? (
+            <div className="mx-auto flex max-w-3xl flex-col justify-center gap-5 py-16">
+              <div>
+                <p className="font-label text-xs font-bold uppercase tracking-widest text-primary">Ready</p>
+                <h2 className="mt-2 text-2xl font-bold text-on-surface">Ask from the indexed knowledge base.</h2>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                {EXAMPLES.map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    onClick={() => setDraft(example)}
+                    className="rounded-lg border border-outline-variant bg-surface-container-lowest p-4 text-left text-sm text-on-surface-variant hover:border-primary hover:text-on-surface"
+                  >
+                    {example}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mx-auto max-w-4xl space-y-5">
+              {messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))}
+              {isLoading && <LoadingBubble />}
+              <div ref={endRef} />
+            </div>
           )}
         </div>
 
-        {message.citations && message.citations.length > 0 && (
-          <div className="flex flex-wrap gap-3 border-t border-blue-50 pt-4">
-            {message.citations.map((citation, index) => (
-              <span
-                key={`${citation.source}_${citation.chunk_index}_${index}`}
-                className="flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-primary"
-              >
-                <span className="material-symbols-outlined text-sm">description</span>
-                {citation.source} {citation.page && `§${citation.page}`}
-              </span>
-            ))}
+        <form onSubmit={(event) => void submit(event)} className="border-t border-outline-variant/40 bg-surface-container-lowest p-4 md:p-6">
+          <div className="mx-auto flex max-w-4xl items-end gap-3 rounded-lg border border-outline-variant bg-white p-2 focus-within:border-primary">
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  void submit()
+                }
+              }}
+              rows={2}
+              placeholder="Ask about uploaded documents, regulatory pages, scanned tables, or diagrams..."
+              className="min-h-[52px] flex-1 resize-none border-0 bg-transparent px-3 py-2 text-sm outline-none focus:ring-0"
+            />
+            <button
+              type="submit"
+              disabled={isLoading || !draft.trim()}
+              className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-on-primary disabled:cursor-not-allowed disabled:opacity-50"
+              title="Send"
+            >
+              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </button>
           </div>
-        )}
+        </form>
+      </section>
+    </div>
+  )
+}
 
-        {message.queryTimeMs !== undefined && (
-          <div className="flex flex-wrap gap-4 border-t border-blue-50 pt-3 text-[10px] font-label uppercase text-outline">
-            <span className="flex items-center gap-1">
-              <span className="material-symbols-outlined text-sm">schedule</span>
-              {formatDuration(message.queryTimeMs)}
-            </span>
-            {message.modelUsed && (
-              <span className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">memory</span>
-                {message.modelUsed}
-              </span>
-            )}
-            {message.provider && (
-              <span className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">cloud</span>
-                {message.provider}
-              </span>
-            )}
-            {message.documentsRetrieved !== undefined && (
-              <span className="flex items-center gap-1">
-                <span className="material-symbols-outlined text-sm">article</span>
-                {message.documentsRetrieved} docs
-              </span>
-            )}
+function SessionButton({ session, active, onClick }: { session: Session; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full rounded-lg p-3 text-left transition-colors ${
+        active ? 'bg-primary text-on-primary' : 'bg-surface-container-lowest text-on-surface hover:bg-surface-container-high'
+      }`}
+    >
+      <div className="truncate text-sm font-semibold">{session.title || 'New Chat'}</div>
+      <div className={`mt-1 text-xs ${active ? 'text-on-primary/80' : 'text-on-surface-variant'}`}>
+        {session.messageCount} messages
+      </div>
+    </button>
+  )
+}
+
+function MessageBubble({ message }: { message: Message }) {
+  const isUser = message.role === 'user'
+  return (
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div className={`max-w-[88%] rounded-lg p-4 ${isUser ? 'bg-primary text-on-primary' : 'bg-surface-container-lowest text-on-surface shadow-sm'}`}>
+        <div className="whitespace-pre-wrap text-sm leading-6">{message.content}</div>
+        {!isUser && message.citations && message.citations.length > 0 && (
+          <details className="mt-4 rounded-lg border border-outline-variant bg-surface-container-low p-3">
+            <summary className="cursor-pointer text-xs font-bold text-primary">Sources ({message.citations.length})</summary>
+            <div className="mt-3 grid gap-3">
+              {message.citations.map((citation, index) => (
+                <div key={`${citation.docId}_${citation.chunkIndex}_${index}`} className="rounded-lg bg-white p-3">
+                  <div className="flex items-center gap-2 text-xs font-bold text-on-surface">
+                    {citation.isImageChunk ? <ImageIcon className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-primary" />}
+                    <span className="truncate">{citation.docName}</span>
+                    <span className="ml-auto text-on-surface-variant">{citation.pageNumber ?? 'web'}</span>
+                  </div>
+                  {citation.chunkPreview && (
+                    <p className="mt-2 line-clamp-3 text-xs leading-5 text-on-surface-variant">{citation.chunkPreview.slice(0, 200)}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
+        {!isUser && message.durationMs && (
+          <div className="mt-3 flex items-center gap-2 text-[11px] text-on-surface-variant">
+            <Database className="h-3.5 w-3.5" />
+            <span>{message.llmProvider ?? 'llm'} in {formatDuration(message.durationMs)}</span>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function LoadingBubble() {
+  return (
+    <div className="max-w-xl rounded-lg bg-surface-container-lowest p-4 shadow-sm">
+      <div className="mb-3 flex items-center gap-2 text-xs font-bold text-primary">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Retrieving and reranking
+      </div>
+      <div className="space-y-2">
+        <div className="h-3 w-5/6 animate-pulse rounded bg-surface-container-high" />
+        <div className="h-3 w-4/6 animate-pulse rounded bg-surface-container-high" />
+        <div className="h-3 w-3/6 animate-pulse rounded bg-surface-container-high" />
       </div>
     </div>
   )
