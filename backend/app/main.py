@@ -1,217 +1,202 @@
-"""FastAPI application entry point for POWERGRID RAG system."""
+"""FastAPI entry point for POWERGRID SmartOps."""
 
+# CODEX-FIX: configure production startup, middleware, API guards, and structured error responses.
+
+from __future__ import annotations
+
+import logging
 import time
 import uuid
-
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from typing import Callable
 
-from app.core.config import get_settings
-from app.core.logging import setup_logging, get_logger
-from app.core.exceptions import PowergridException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+
 from app.api.routes import router
+from app.core.config import get_settings
+from app.core.exceptions import PowergridException, ServiceUnavailableError
+from app.core.logging import setup_logging
 
-# Setup logging
 setup_logging()
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def _build_cors_origins() -> list[str]:
-    """Build CORS origins list from config + environment."""
-    origins = list(settings.CORS_ORIGINS)
-    # Add explicit frontend URL if set
-    if settings.FRONTEND_URL:
-        origins.append(settings.FRONTEND_URL)
-    # Auto-detect Railway
-    if settings.RAILWAY_STATIC_URL:
-        origins.append(f"https://{settings.RAILWAY_STATIC_URL}")
-    # Deduplicate
-    return list(set(origins))
+class RequestBodySizeMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp, max_bytes: int):
+        super().__init__(app)
+        self.max_bytes = max_bytes
+
+    async def dispatch(self, request: Request, call_next: Callable):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": f"Request body exceeds {settings.MAX_REQUEST_BODY_MB}MB"},
+                    )
+            except ValueError:
+                pass
+        return await call_next(request)
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        started = time.perf_counter()
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "%s %s -> %s in %.2fms request_id=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.perf_counter() - started) * 1000,
+            request_id,
+        )
+        return response
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        response = await call_next(request)
+        if settings.ENABLE_SECURITY_HEADERS:
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+            if request.url.path not in {"/docs", "/redoc", "/openapi.json"}:
+                response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
+        if settings.ENABLE_HSTS and request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+
+def _masked_settings() -> dict:
+    values = settings.model_dump()
+    for key in values:
+        if any(secret in key.lower() for secret in ("key", "token", "secret")) and values[key]:
+            values[key] = "***"
+    return values
+
+
+def _cors_origins() -> list[str]:
+    origins = [settings.FRONTEND_URL]
+    if settings.ENVIRONMENT == "development":
+        origins.extend(["http://localhost:3000", "http://localhost:5173"])
+    return sorted(set(origin for origin in origins if origin))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager for startup and shutdown."""
-    # Startup
-    logger.info(
-        "application_starting",
-        app_name=settings.APP_NAME,
-        version=settings.APP_VERSION,
-        environment=settings.ENVIRONMENT,
-        cors_origins=_build_cors_origins(),
-    )
-
-    # Ensure data directories exist
-    from pathlib import Path
-    Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-    # CODEX-FIX: initialize LanceDB on startup so Railway logs fail fast on vector-store issues.
+    logger.info("Starting POWERGRID SmartOps with settings: %s", _masked_settings())
     from app.services.vector_store import get_vector_store
+
     await get_vector_store().initialize()
-    logger.info("lancedb_stats", **await get_vector_store().get_stats())
-
-    logger.info("application_ready")
+    logger.info("LanceDB startup stats: %s", await get_vector_store().get_stats())
     yield
-
-    # Shutdown
-    logger.info("application_shutting_down")
+    logger.info("POWERGRID SmartOps shutdown complete")
 
 
-# Create FastAPI application
 app = FastAPI(
-    title=settings.APP_NAME,
-    description="""
-    POWERGRID Operations Knowledge Assistant API.
-
-    Provides RAG (Retrieval-Augmented Generation) capabilities for querying
-    CEA guidelines, POWERGRID technical manuals, and IT circulars.
-    """,
-    version=settings.APP_VERSION,
+    title="POWERGRID SmartOps API",
+    version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# CORS middleware — production-ready dynamic origins
+if settings.TRUST_PROXY_HEADERS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+
+app.add_middleware(RequestBodySizeMiddleware, max_bytes=settings.MAX_REQUEST_BODY_MB * 1024 * 1024)
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_build_cors_origins(),
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-Id"],
+    expose_headers=["X-Request-ID", "Retry-After"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
+
+if settings.ENABLE_RATE_LIMITING:
+    from slowapi import Limiter
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.util import get_remote_address
+
+    app.state.limiter = Limiter(key_func=get_remote_address)
+    app.add_middleware(SlowAPIMiddleware)
 
 
-@app.middleware("http")
-async def request_context_middleware(request: Request, call_next):
-    """Attach request ID and baseline security headers to every response."""
-    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-    request.state.request_id = request_id
-    start = time.perf_counter()
-
-    max_body_bytes = settings.MAX_REQUEST_BODY_MB * 1024 * 1024
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            body_size = int(content_length)
-            if body_size > max_body_bytes:
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        "error_code": "REQUEST_TOO_LARGE",
-                        "message": f"Request exceeds {settings.MAX_REQUEST_BODY_MB}MB limit",
-                        "request_id": request_id,
-                    },
-                )
-        except ValueError:
-            pass
-
-    response = await call_next(request)
-
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-    response.headers["X-Request-Id"] = request_id
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-
-    if settings.ENABLE_SECURITY_HEADERS:
-        path = request.url.path
-        if path not in {"/docs", "/redoc", "/openapi.json"}:
-            response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-            response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-            response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'"
-
-    if settings.ENABLE_HSTS and request.url.scheme == "https":
-        response.headers["Strict-Transport-Security"] = (
-            f"max-age={settings.HSTS_MAX_AGE_SECONDS}; includeSubDomains"
-        )
-
-    logger.info(
-        "request_completed",
-        request_id=request_id,
-        method=request.method,
-        path=request.url.path,
-        status_code=response.status_code,
-        duration_ms=duration_ms,
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Validation error",
+            "errors": exc.errors(),
+            "request_id": getattr(request.state, "request_id", None),
+        },
     )
-    return response
 
 
-# Exception handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "request_id": getattr(request.state, "request_id", None),
+        },
+        headers=exc.headers,
+    )
+
+
 @app.exception_handler(PowergridException)
 async def powergrid_exception_handler(request: Request, exc: PowergridException):
-    """Handle custom Powergrid exceptions."""
-    request_id = getattr(request.state, "request_id", None)
-    logger.error(
-        "powergrid_exception",
-        request_id=request_id,
-        error_code=exc.error_code,
-        message=exc.message,
-        path=request.url.path
-    )
+    status_code = 503 if isinstance(exc, ServiceUnavailableError) else 500
     return JSONResponse(
-        status_code=400 if exc.error_code == "VALIDATION_ERROR" else 500,
+        status_code=status_code,
         content={
             "error_code": exc.error_code,
             "message": exc.message,
             "details": exc.details,
-            "request_id": request_id,
-        }
+            "request_id": getattr(request.state, "request_id", None),
+        },
     )
 
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle general exceptions."""
     request_id = getattr(request.state, "request_id", None)
-    logger.error(
-        "unhandled_exception",
-        request_id=request_id,
-        error=str(exc),
-        type=type(exc).__name__,
-        path=request.url.path
-    )
+    logger.exception("Unhandled exception request_id=%s path=%s", request_id, request.url.path)
     return JSONResponse(
         status_code=500,
         content={
-            "error_code": "INTERNAL_ERROR",
-            "message": "An unexpected error occurred",
-            "details": {"error_type": type(exc).__name__},
+            "detail": "Internal server error",
             "request_id": request_id,
-        }
+        },
     )
 
 
-# Include API routes
 app.include_router(router)
 
 
 @app.get("/")
-async def root():
-    """Root endpoint."""
-    return {
-        "name": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "status": "operational",
-        "docs": "/docs"
-    }
+async def root() -> dict[str, str]:
+    return {"name": "POWERGRID SmartOps API", "version": "1.0.0", "status": "operational"}
 
 
 @app.get("/ping")
-async def ping():
-    """Simple ping endpoint for load balancers."""
+async def ping() -> dict[str, str]:
     return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
-    )

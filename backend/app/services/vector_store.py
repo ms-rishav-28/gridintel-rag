@@ -59,7 +59,7 @@ class VectorStore:
         """Connect to or create the LanceDB database. Called once at startup."""
         path = settings.LANCEDB_PATH
         os.makedirs(path, exist_ok=True)
-        logger.info("initialising_lancedb", path=path)
+        logger.info("Initialising LanceDB at %s", path)
 
         self._db = await lancedb.connect_async(path)
         existing = await self._db.table_names()
@@ -72,16 +72,15 @@ class VectorStore:
                 stored_dim = vec_field.type.list_size
                 if stored_dim != 1024:
                     logger.critical(
-                        "lancedb_embedding_dimension_mismatch",
-                        stored_dim=stored_dim,
-                        current_dim=1024,
+                        "LanceDB embedding dimension mismatch: stored=%s current=1024",
+                        stored_dim,
                     )
                     await self._db.drop_table(self.TABLE_NAME)
                     await self._create_table()
             logger.info(
-                "lancedb_table_opened",
-                table=self.TABLE_NAME,
-                rows=await self._table.count_rows(),
+                "LanceDB table %s opened with %s rows",
+                self.TABLE_NAME,
+                await self._table.count_rows(),
             )
         else:
             await self._create_table()
@@ -98,7 +97,7 @@ class VectorStore:
             mode="overwrite",
         )
         await self._table.create_fts_index("content", replace=True)
-        logger.info("lancedb_table_created", table=self.TABLE_NAME)
+        logger.info("Created LanceDB table %s", self.TABLE_NAME)
 
     def _ensure_ready(self) -> None:
         if not self._ready or self._table is None:
@@ -127,7 +126,7 @@ class VectorStore:
         await self._table.delete(f"doc_id = '{escaped_doc_id}'")
         after = await self._table.count_rows()
         deleted = before - after
-        logger.info("lancedb_chunks_deleted", doc_id=doc_id, deleted=deleted)
+        logger.info("Deleted %s chunks for doc_id=%s", deleted, doc_id)
         return deleted
 
     async def delete_all(self) -> None:

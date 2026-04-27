@@ -36,11 +36,11 @@ class ConvexService:
             if settings.CONVEX_ADMIN_KEY and hasattr(self._client, "set_admin_auth"):
                 self._client.set_admin_auth(settings.CONVEX_ADMIN_KEY)
             self.enabled = True
-            logger.info("convex_connected", url=settings.CONVEX_URL)
+            logger.info("Convex connected: %s", settings.CONVEX_URL)
         except ImportError:
             logger.error("convex package not installed. pip install convex")
         except Exception as exc:
-            logger.error("convex_connection_failed", error=str(exc))
+            logger.error("Convex connection failed: %s", exc)
 
     @property
     def is_connected(self) -> bool:
@@ -55,7 +55,7 @@ class ConvexService:
                 return await asyncio.to_thread(self._client.query, fn[6:], args or {})
             return await asyncio.to_thread(self._client.mutation, fn, args or {})
         except Exception as exc:
-            logger.error("convex_call_failed", function=fn, error=str(exc), exc_info=True)
+            logger.error("Convex call %s failed: %s", fn, exc, exc_info=True)
             return None
 
     # -- Documents --------------------------------------------------------------

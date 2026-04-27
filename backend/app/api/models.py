@@ -1,182 +1,85 @@
-"""Pydantic models for API requests and responses."""
+"""Pydantic models for POWERGRID SmartOps API."""
 
-from typing import List, Optional, Dict, Any
+# CODEX-FIX: replace legacy metadata models with durable RAG, job, settings, and health contracts.
+
+from __future__ import annotations
+
+from typing import Literal
+
 from pydantic import BaseModel, Field, HttpUrl
-from enum import Enum
 
 
-class DocumentType(str, Enum):
-    """Types of documents in the knowledge base."""
-    CEA_GUIDELINE = "CEA_GUIDELINE"
-    TECHNICAL_MANUAL = "TECHNICAL_MANUAL"
-    IT_CIRCULAR = "IT_CIRCULAR"
-    TEXT_DOCUMENT = "TEXT_DOCUMENT"
+SourceType = Literal["pdf", "docx", "txt", "webpage"]
 
 
-class EquipmentType(str, Enum):
-    """Types of powergrid equipment."""
-    TRANSFORMER = "TRANSFORMER"
-    CIRCUIT_BREAKER = "CIRCUIT_BREAKER"
-    TRANSMISSION_LINE = "TRANSMISSION_LINE"
-    SUBSTATION_BAY = "SUBSTATION_BAY"
-    PROTECTION_SYSTEM = "PROTECTION_SYSTEM"
-    PROTECTION_RELAY = "PROTECTION_RELAY"
-    INSULATOR = "INSULATOR"
-    BUSBAR = "BUSBAR"
-    CURRENT_TRANSFORMER = "CURRENT_TRANSFORMER"
-    POTENTIAL_TRANSFORMER = "POTENTIAL_TRANSFORMER"
-    VOLTAGE_TRANSFORMER = "VOLTAGE_TRANSFORMER"
-
-
-class VoltageLevel(str, Enum):
-    """Standard voltage levels in POWERGRID."""
-    KV_66 = "66 kV"
-    KV_132 = "132 kV"
-    KV_220 = "220 kV"
-    KV_400 = "400 kV"
-    KV_765 = "765 kV"
-    KV_1200 = "1200 kV"
+class RAGFilters(BaseModel):
+    doc_ids: list[str] = Field(default_factory=list)
+    source_type: SourceType | None = None
 
 
 class QueryRequest(BaseModel):
-    """Request model for RAG queries."""
-    question: str = Field(
-        ...,
-        description="The question to ask about POWERGRID operations",
-        min_length=5,
-        max_length=500,
-        examples=["What is the maintenance interval for a 220 kV circuit breaker?"]
-    )
-    equipment_type: Optional[EquipmentType] = Field(
-        None,
-        description="Filter by equipment type"
-    )
-    voltage_level: Optional[VoltageLevel] = Field(
-        None,
-        description="Filter by voltage level"
-    )
-    doc_types: Optional[List[DocumentType]] = Field(
-        None,
-        description="Filter by document types"
-    )
-    use_fallback: bool = Field(
-        True,
-        description="Enable fallback search strategies if no results found"
-    )
-
-
-class UrlIngestionRequest(BaseModel):
-    """Request model for ingesting web content from a URL."""
-
-    url: HttpUrl = Field(..., description="HTTP/HTTPS URL to ingest")
-    doc_type: Optional[DocumentType] = Field(None, description="Optional document type override")
-    equipment_type: Optional[EquipmentType] = Field(None, description="Optional equipment type")
-    voltage_level: Optional[VoltageLevel] = Field(None, description="Optional voltage level")
+    query: str = Field(..., min_length=1, max_length=4000)
+    session_id: str | None = None
+    filters: RAGFilters | None = None
 
 
 class Citation(BaseModel):
-    """Citation information for a source document."""
-    source: str = Field(..., description="Source document name")
-    doc_type: str = Field(..., description="Type of document")
-    page: str = Field(..., description="Page or reference number")
-    chunk_index: int = Field(..., description="Chunk index in the document")
-    relevance_score: float = Field(..., description="Similarity score (0-1)")
-    equipment_type: Optional[str] = Field(None, description="Equipment type if applicable")
-    voltage_level: Optional[str] = Field(None, description="Voltage level if applicable")
-    text_preview: str = Field(..., description="Preview of the cited text")
+    docId: str
+    docName: str
+    pageNumber: int | None = None
+    chunkIndex: int | None = None
+    relevanceScore: float | None = None
+    chunkPreview: str | None = None
+    isImageChunk: bool | None = None
 
 
 class QueryResponse(BaseModel):
-    """Response model for RAG queries."""
-    answer: str = Field(..., description="Generated answer")
-    citations: List[Citation] = Field(..., description="Source citations")
-    confidence: float = Field(..., description="Overall confidence score (0-1)")
-    model_used: str = Field(..., description="LLM model used")
-    provider: str = Field(..., description="LLM provider used")
-    query_time_ms: float = Field(..., description="Query processing time in milliseconds")
-    documents_retrieved: int = Field(..., description="Number of documents retrieved")
-    is_insufficient: bool = Field(..., description="Whether the information is insufficient")
+    answer: str
+    citations: list[Citation]
+    session_id: str
+    llm_provider: str
+    duration_ms: int
 
 
-class DocumentUploadResponse(BaseModel):
-    """Response model for document upload."""
-    doc_id: str = Field(..., description="Unique document ID")
-    filename: str = Field(..., description="Original filename")
-    doc_type: str = Field(..., description="Detected document type")
-    chunks_processed: int = Field(..., description="Number of chunks created")
-    file_hash: str = Field(..., description="SHA-256 hash of file")
-    equipment_type: Optional[str] = Field(None, description="Detected equipment type")
-    voltage_level: Optional[str] = Field(None, description="Detected voltage level")
-    status: str = Field(..., description="Processing status")
+class UrlUploadRequest(BaseModel):
+    url: HttpUrl
 
 
-class DocumentBatchUploadResponse(BaseModel):
-    """Response model for batch document upload."""
-    processed: int = Field(..., description="Number of successfully processed documents")
-    failed: int = Field(..., description="Number of failed documents")
-    documents: List[DocumentUploadResponse] = Field(..., description="List of processed documents")
-    errors: List[Dict[str, str]] = Field(default=[], description="List of errors if any")
+class UploadResponse(BaseModel):
+    doc_id: str
+    job_id: str
+    status: Literal["processing"]
+
+
+class JobResponse(BaseModel):
+    jobId: str | None = None
+    docId: str | None = None
+    sourceType: str | None = None
+    sourceUrl: str | None = None
+    status: str
+    progressMessage: str | None = None
+    errorMessage: str | None = None
+    totalChunks: int | None = None
+    processedChunks: int | None = None
+    createdAt: float | None = None
+    updatedAt: float | None = None
+
+
+class SettingsRequest(BaseModel):
+    llmProvider: str | None = None
+    llmModel: str | None = None
+    embeddingModel: str | None = None
+    enableVision: bool | None = None
+    enableBrowserIngestion: bool | None = None
+    systemPromptOverride: str | None = None
+
+
+class ReindexResponse(BaseModel):
+    reindex_started: bool
+    document_count: int
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str = Field(..., description="Service status")
-    version: str = Field(..., description="API version")
-    vector_store: Dict[str, Any] = Field(..., description="Vector store statistics")
-    llm_provider: str = Field(..., description="Active LLM provider")
-    llm_model: str = Field(..., description="Active LLM model")
-    persistence_connected: bool = Field(False, description="Whether persistence backend is connected")
-
-
-class ErrorResponse(BaseModel):
-    """Error response model."""
-    error_code: str = Field(..., description="Error code")
-    message: str = Field(..., description="Error message")
-    details: Optional[Dict[str, Any]] = Field(None, description="Additional error details")
-
-
-# ─── Chat Models ─────────────────────────────────────────────────
-
-class ChatMessageRequest(BaseModel):
-    """Request to save a chat message."""
-    session_id: str = Field(..., description="Chat session ID")
-    role: str = Field(..., description="Message role: 'user' or 'assistant'")
-    content: str = Field(..., description="Message content")
-    timestamp: Optional[str] = Field(None, description="ISO timestamp for the message")
-    citations: Optional[List[Citation]] = Field(None, description="Citations for assistant messages")
-    confidence: Optional[float] = Field(None, description="Confidence score")
-    model_used: Optional[str] = Field(None, description="LLM model used")
-    provider: Optional[str] = Field(None, description="LLM provider used")
-    query_time_ms: Optional[float] = Field(None, description="Query time in ms")
-    documents_retrieved: Optional[int] = Field(None, description="Number of retrieved docs")
-    is_insufficient: Optional[bool] = Field(None, description="Whether response lacked sufficient context")
-
-
-class ChatSessionResponse(BaseModel):
-    """Response model for a chat session."""
-    session_id: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    messages: List[Dict[str, Any]] = []
-
-
-# ─── Settings Models ─────────────────────────────────────────────
-
-class UserSettingsRequest(BaseModel):
-    """Request to save user settings."""
-    theme: Optional[str] = Field(None, description="'light' or 'dark'")
-    notifications: Optional[Dict[str, bool]] = Field(None, description="Notification preferences")
-    profile: Optional[Dict[str, str]] = Field(None, description="User profile fields")
-
-
-class MetadataOption(BaseModel):
-    """Reusable key/label model for enum-driven frontend filters."""
-    value: str
-    label: str
-
-
-class MetadataOptionsResponse(BaseModel):
-    """Available metadata options for filtering and upload forms."""
-    equipment_types: List[MetadataOption]
-    voltage_levels: List[MetadataOption]
-    document_types: List[MetadataOption]
+    status: Literal["healthy", "degraded"]
+    version: str
+    components: dict

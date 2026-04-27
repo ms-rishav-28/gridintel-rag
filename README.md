@@ -7,10 +7,10 @@
 ![Convex](https://img.shields.io/badge/Convex-Realtime_DB-F9FAFB?logo=convex&logoColor=111827)
 ![Railway](https://img.shields.io/badge/Railway-Backend_Hosting-0B0D0E?logo=railway&logoColor=white)
 ![Vercel](https://img.shields.io/badge/Vercel-Frontend_Hosting-000000?logo=vercel&logoColor=white)
-![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-F97316)
+![LanceDB](https://img.shields.io/badge/LanceDB-Vector_Store-0F766E)
 
 > **Production-grade RAG system** for POWERGRID operations knowledge management.  
-> Frontend → **Vercel** | Backend → **Railway** | Optional persistence → **Convex**
+> Frontend → **Vercel** | Backend → **Railway** | Durable persistence → **Convex + LanceDB**
 
 ---
 
@@ -21,9 +21,9 @@
 │   Vercel     │ ─────────────────→ │     Railway      │ ───────────────→ │   Convex    │
 │  (React SPA) │                    │  (FastAPI + ML)  │                  │  Realtime   │
 │              │                    │                  │                  │     DB      │
-│  Vite Build  │                    │  ChromaDB (RAM)  │                  │  Documents  │
-│  Tailwind    │                    │  Sentence-BERT   │                  │ Chat Logs   │
-│  Convex React│                    │  LangChain       │                  │  Settings   │
+│  Vite Build  │                    │  LanceDB /data   │                  │  Documents  │
+│  Tailwind    │                    │  BGE-M3          │                  │ Chat Logs   │
+│  Convex React│                    │  Hybrid RAG      │                  │  Settings   │
 └──────────────┘                    └──────────────────┘                  └─────────────┘
 ```
 
@@ -90,26 +90,33 @@ Set these in **Variables** tab:
 
 | Variable | Value | Required |
 |---|---|---|
-| `GOOGLE_API_KEY` | Your Gemini API key | ✅ |
-| `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | ❌ |
-| `FRONTEND_URL` | `https://your-app.vercel.app` | ✅ |
-| `DEFAULT_LLM_PROVIDER` | `gemini` | ✅ |
-| `DEFAULT_LLM_MODEL` | `gemini-1.5-flash` | ✅ |
-| `SECRET_KEY` | Random 64-char string | ✅ |
-| `CONVEX_ADMIN_KEY` | Convex admin key (optional, recommended for server mutations) | ❌ |
-| `BACKEND_API_KEY` | Strong random API key for frontend-backend auth | Recommended |
-| `MAX_REQUEST_BODY_MB` | Global request body guardrail (default `55`) | Recommended |
-| `TRUST_PROXY_HEADERS` | Trust forwarded IP headers (`true` only behind trusted proxy) | Recommended |
-| `TRUSTED_PROXY_IPS` | Comma-separated trusted proxy IP/CIDR allow-list | Optional |
-| `ENABLE_SECURITY_HEADERS` | Enable response hardening headers | Recommended |
-| `ENABLE_HSTS` | Add HSTS on HTTPS responses | Recommended |
-| `HSTS_MAX_AGE_SECONDS` | HSTS max-age value in seconds | Optional |
+| `ENVIRONMENT` | `production` | Required |
+| `SECRET_KEY` | Random 64-char string | Required |
+| `LOG_LEVEL` | `INFO` | Optional |
+| `BACKEND_API_KEY` | Strong random API key for frontend-backend auth | Required for protected deployments |
+| `FRONTEND_URL` | `https://your-app.vercel.app` | Required |
+| `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | Required for persistence |
+| `CONVEX_ADMIN_KEY` | Convex admin key for server mutations | Recommended |
+| `LANCEDB_PATH` | `/data/lancedb` | Required on Railway |
+| `EMBEDDING_MODEL` | `BAAI/bge-m3` | Required |
+| `EMBEDDING_DEVICE` | `cpu` | Required |
+| `VISION_MODEL` | `microsoft/Florence-2-base` | Required |
+| `ENABLE_VISION` | `true` | Recommended |
+| `DEFAULT_LLM_PROVIDER` | `gemini` | Required |
+| `DEFAULT_LLM_MODEL` | `gemini-2.0-flash` | Required |
+| `GOOGLE_API_KEY` | Your Gemini API key | Required unless using another provider |
+| `GROQ_API_KEY` | Your Groq key | Optional fallback |
+| `HF_API_TOKEN` | Hugging Face token for HF fallback | Required for HF fallback |
+| `MAX_UPLOAD_SIZE_MB` | `150` | Required |
+| `MAX_REQUEST_BODY_MB` | `155` | Required |
+| `ENABLE_BROWSER_INGESTION` | `false` | Optional |
+| `URL_CACHE_TTL_HOURS` | `24` | Optional |
 | `ENABLE_RATE_LIMITING` | `true` | Recommended |
 | `RATE_LIMIT_REQUESTS` | `100` | Recommended |
 | `RATE_LIMIT_WINDOW` | `3600` | Recommended |
-| `ENVIRONMENT` | `production` | ✅ |
-| `GROQ_API_KEY` | Your Groq key (if using Groq) | ❌ |
-| `LOG_LEVEL` | `INFO` | ❌ |
+| `ENABLE_SECURITY_HEADERS` | `true` | Recommended |
+| `ENABLE_HSTS` | `true` | Recommended |
+| `TRUST_PROXY_HEADERS` | `true` on Railway | Recommended |
 
 If `BACKEND_API_KEY` is configured, all non-exempt API routes require the `X-API-Key` request header.
 
@@ -247,7 +254,7 @@ powergrid-rag/
 │   │   │   ├── convex_service.py      # Convex persistence layer
 │   │   │   ├── llm_service.py         # Gemini/Groq integration
 │   │   │   ├── rag_engine.py          # RAG orchestrator
-│   │   │   └── vector_store.py        # ChromaDB vector index
+│   │   │   └── vector_store.py        # LanceDB vector index
 │   │   └── main.py                # FastAPI app entry point
 │   ├── railway.json               # Railway deployment config
 │   ├── Procfile                   # Gunicorn start command

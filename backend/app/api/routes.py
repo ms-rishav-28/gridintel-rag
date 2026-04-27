@@ -1,571 +1,355 @@
-"""API routes for POWERGRID RAG system."""
+"""API routes for POWERGRID SmartOps."""
 
-import asyncio
-from typing import List
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
-from fastapi.responses import JSONResponse
+# CODEX-FIX: wire durable Convex metadata/storage, LanceDB vectors, RAG query, and reindex endpoints.
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import logging
+import socket
+import tempfile
+import uuid
+from pathlib import Path
+from urllib.parse import urlparse
+
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, UploadFile, status
 
 from app.api.models import (
-    QueryRequest, QueryResponse, DocumentUploadResponse,
-    DocumentBatchUploadResponse, HealthResponse, ErrorResponse,
-    EquipmentType, VoltageLevel, DocumentType,
-    ChatMessageRequest, ChatSessionResponse,
-    UserSettingsRequest, MetadataOptionsResponse, MetadataOption,
-    UrlIngestionRequest,
+    HealthResponse,
+    JobResponse,
+    QueryRequest,
+    QueryResponse,
+    ReindexResponse,
+    SettingsRequest,
+    UploadResponse,
+    UrlUploadRequest,
 )
 from app.core.config import get_settings
-from app.core.exceptions import RAGQueryError, DocumentProcessingError
-from app.core.logging import get_logger
 from app.core.security import enforce_api_key, enforce_rate_limit
+from app.services.convex_service import get_convex_service
+from app.services.document_processor import get_document_processor
+from app.services.embedding_service import get_embedding_service
+from app.services.llm_service import get_llm_service
+from app.services.rag_engine import get_rag_engine
+from app.services.vector_store import get_vector_store
+from app.services.vision_service import get_vision_service
+from app.services.web_ingestion import ingest_url
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 router = APIRouter(
-    prefix=settings.API_V1_PREFIX,
+    prefix="/api/v1",
     dependencies=[Depends(enforce_api_key), Depends(enforce_rate_limit)],
 )
 
 
-# ─── Lazy service accessors (never crash at import time) ─────────
-
-def _get_rag_engine():
-    from app.services.rag_engine import rag_engine
-    return rag_engine
-
-def _get_document_processor():
-    from app.services.document_processor import document_processor
-    return document_processor
-
-def _get_vector_store():
-    from app.services.vector_store import vector_store
-    return vector_store
-
-def _get_persistence():
-    from app.services.convex_service import convex_service
-    return convex_service
-
-
-# ─── Helpers ─────────────────────────────────────────────────────
-
-async def _read_upload_chunked(file: UploadFile, max_bytes: int) -> bytes:
-    """Read an uploaded file in 64 KB chunks, aborting early if over limit.
-
-    Fix #3: avoids reading the entire file into RAM in one shot.
-    """
-    chunks: list[bytes] = []
+async def _read_upload_bytes(file: UploadFile, max_bytes: int) -> bytes:
     total = 0
-    while True:
-        chunk = await file.read(65_536)  # 64 KB
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error_code": "FILE_TOO_LARGE",
-                    "message": f"File size exceeds {settings.MAX_UPLOAD_SIZE_MB}MB limit",
-                },
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
+    with tempfile.SpooledTemporaryFile(max_size=10 * 1024 * 1024) as tmp:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB}MB upload limit",
+                )
+            tmp.write(chunk)
+        tmp.seek(0)
+        return tmp.read()
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  RAG QUERY
-# ═══════════════════════════════════════════════════════════════════
-
-@router.post("/query", response_model=QueryResponse)
-async def query(request: QueryRequest):
-    """
-    Execute a RAG query to get answers from POWERGRID documentation.
-    """
-    try:
-        rag = _get_rag_engine()
-        if request.use_fallback:
-            response = await rag.query_with_fallback(
-                question=request.question,
-                equipment_type=request.equipment_type.value if request.equipment_type else None,
-                voltage_level=request.voltage_level.value if request.voltage_level else None,
-                doc_types=[dt.value for dt in request.doc_types] if request.doc_types else None,
-            )
-        else:
-            response = await rag.query(
-                question=request.question,
-                equipment_type=request.equipment_type.value if request.equipment_type else None,
-                voltage_level=request.voltage_level.value if request.voltage_level else None,
-                doc_types=[dt.value for dt in request.doc_types] if request.doc_types else None,
-            )
-
-        return QueryResponse(
-            answer=response.answer,
-            citations=response.citations,
-            confidence=response.confidence,
-            model_used=response.model_used,
-            provider=response.provider,
-            query_time_ms=response.query_time_ms,
-            documents_retrieved=response.documents_retrieved,
-            is_insufficient=response.is_insufficient
-        )
-
-    except RAGQueryError as e:
-        logger.error("query_endpoint_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": e.error_code,
-            "message": e.message,
-            "details": e.details
-        })
-    except Exception as e:
-        logger.error("unexpected_query_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "INTERNAL_ERROR",
-            "message": "An unexpected error occurred",
-            "details": {"error": str(e)}
-        })
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  DOCUMENT MANAGEMENT
-# ═══════════════════════════════════════════════════════════════════
-
-@router.post("/documents/upload", response_model=DocumentUploadResponse)
-async def upload_document(
-    file: UploadFile = File(...),
-    doc_type: DocumentType = Form(None),
-    equipment_type: EquipmentType = Form(None),
-    voltage_level: VoltageLevel = Form(None),
-):
-    """Upload and process a single document (PDF, DOCX, DOC, TXT).
-
-    Fix #1: All sync processing is offloaded to thread pools via async service methods.
-    Fix #2: Removed unused BackgroundTasks parameter.
-    Fix #3: File is read in 64 KB chunks with early abort.
-    Fix #11: Dedup check before processing.
-    """
-    try:
-        filename = file.filename
-        ext = filename.split(".")[-1].lower() if "." in filename else ""
-
-        if ext not in settings.SUPPORTED_DOC_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error_code": "UNSUPPORTED_FILE_TYPE",
-                    "message": f"File type '{ext}' not supported. Use: {settings.SUPPORTED_DOC_TYPES}"
-                }
-            )
-
-        # Chunked read with early size abort (fix #3)
-        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        content = await _read_upload_chunked(file, max_bytes)
-
-        custom_metadata = {}
-        if doc_type:
-            custom_metadata['doc_type'] = doc_type.value
-        if equipment_type:
-            custom_metadata['equipment_type'] = equipment_type.value
-        if voltage_level:
-            custom_metadata['voltage_level'] = voltage_level.value
-
-        processor = _get_document_processor()
-        vs = _get_vector_store()
-        storage = _get_persistence()
-
-        # Dedup check (fix #11): compute hash early and check vector store
-        import hashlib
-        file_hash = hashlib.sha256(content).hexdigest()
-        if await vs.check_hash_exists(file_hash):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_code": "DUPLICATE_DOCUMENT",
-                    "message": "This document has already been ingested.",
-                    "details": {"file_hash": file_hash[:16]},
-                },
-            )
-
-        # All async — runs in thread pools, does NOT block event loop (fix #1)
-        processed = await processor.process_file(filename, content, custom_metadata, precomputed_hash=file_hash)
-        chunks_added = await vs.add_documents(processed.chunks, processed.doc_id)
-
-        # Persist metadata to Convex
-        await storage.save_document_metadata(processed.doc_id, {
-            **processed.metadata,
-            "chunks_count": chunks_added,
-        })
-
-        return DocumentUploadResponse(
-            doc_id=processed.doc_id,
-            filename=filename,
-            doc_type=processed.metadata.get('doc_type', 'UNKNOWN'),
-            chunks_processed=chunks_added,
-            file_hash=processed.file_hash,
-            equipment_type=processed.metadata.get('equipment_type'),
-            voltage_level=processed.metadata.get('voltage_level'),
-            status="success"
-        )
-
-    except DocumentProcessingError as e:
-        logger.error("document_upload_error", error=str(e), filename=file.filename)
-        raise HTTPException(status_code=400, detail={
-            "error_code": e.error_code,
-            "message": e.message,
-            "details": e.details
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("unexpected_upload_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "UPLOAD_FAILED",
-            "message": "Failed to process document",
-            "details": {"error": str(e)}
-        })
-
-
-@router.post("/documents/upload-url", response_model=DocumentUploadResponse)
-async def upload_document_from_url(request: UrlIngestionRequest):
-    """Fetch and ingest a document/webpage directly from URL."""
-    try:
-        custom_metadata = {}
-        if request.doc_type:
-            custom_metadata["doc_type"] = request.doc_type.value
-        if request.equipment_type:
-            custom_metadata["equipment_type"] = request.equipment_type.value
-        if request.voltage_level:
-            custom_metadata["voltage_level"] = request.voltage_level.value
-
-        processor = _get_document_processor()
-        vs = _get_vector_store()
-        storage = _get_persistence()
-
-        processed = await processor.process_url(str(request.url), custom_metadata)
-
-        # Dedup check
-        if await vs.check_hash_exists(processed.file_hash):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_code": "DUPLICATE_DOCUMENT",
-                    "message": "This content has already been ingested.",
-                    "details": {"file_hash": processed.file_hash[:16]},
-                },
-            )
-
-        chunks_added = await vs.add_documents(processed.chunks, processed.doc_id)
-
-        await storage.save_document_metadata(processed.doc_id, {
-            **processed.metadata,
-            "chunks_count": chunks_added,
-        })
-
-        return DocumentUploadResponse(
-            doc_id=processed.doc_id,
-            filename=processed.metadata.get("source", str(request.url)),
-            doc_type=processed.metadata.get("doc_type", "UNKNOWN"),
-            chunks_processed=chunks_added,
-            file_hash=processed.file_hash,
-            equipment_type=processed.metadata.get("equipment_type"),
-            voltage_level=processed.metadata.get("voltage_level"),
-            status="success",
-        )
-
-    except DocumentProcessingError as e:
-        logger.error("url_upload_error", error=str(e), url=str(request.url))
-        raise HTTPException(status_code=400, detail={
-            "error_code": e.error_code,
-            "message": e.message,
-            "details": e.details,
-        })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("unexpected_url_upload_error", error=str(e), url=str(request.url))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "URL_UPLOAD_FAILED",
-            "message": "Failed to ingest URL content",
-            "details": {"error": str(e)},
-        })
-
-
-@router.post("/documents/batch-upload", response_model=DocumentBatchUploadResponse)
-async def batch_upload_documents(files: List[UploadFile] = File(...)):
-    """Upload and process multiple documents in batch.
-
-    Fix #12: Files are processed concurrently via asyncio.gather instead of sequentially.
-    """
-    processor = _get_document_processor()
-    vs = _get_vector_store()
-    storage = _get_persistence()
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-
-    # Step 1: Read all files concurrently (validation + chunked read)
-    file_data: list[tuple[str, bytes]] = []
-    errors = []
-
-    for file in files:
-        filename = file.filename
-        ext = filename.split(".")[-1].lower() if "." in filename else ""
-
-        if ext not in settings.SUPPORTED_DOC_TYPES:
-            errors.append({"file": filename, "error": "Unsupported file type"})
-            continue
-
-        try:
-            content = await _read_upload_chunked(file, max_bytes)
-            file_data.append((filename, content))
-        except HTTPException as e:
-            errors.append({"file": filename, "error": e.detail.get("message", str(e))})
-
-    # Step 2: Process all valid files concurrently (fix #12)
-    async def _process_one(filename: str, content: bytes):
-        processed = await processor.process_file(filename, content)
-
-        # Dedup
-        if await vs.check_hash_exists(processed.file_hash):
-            return None, {"file": filename, "error": "Duplicate document"}
-
-        chunks_added = await vs.add_documents(processed.chunks, processed.doc_id)
-
-        await storage.save_document_metadata(processed.doc_id, {
-            **processed.metadata,
-            "chunks_count": chunks_added,
-        })
-
-        return DocumentUploadResponse(
-            doc_id=processed.doc_id,
-            filename=filename,
-            doc_type=processed.metadata.get('doc_type', 'UNKNOWN'),
-            chunks_processed=chunks_added,
-            file_hash=processed.file_hash,
-            equipment_type=processed.metadata.get('equipment_type'),
-            voltage_level=processed.metadata.get('voltage_level'),
-            status="success"
-        ), None
-
-    tasks = [_process_one(fn, c) for fn, c in file_data]
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-
-    processed_docs = []
-    for i, outcome in enumerate(outcomes):
-        if isinstance(outcome, Exception):
-            logger.error("batch_upload_error", error=str(outcome), filename=file_data[i][0])
-            errors.append({"file": file_data[i][0], "error": str(outcome)})
-        else:
-            doc_resp, err = outcome
-            if err:
-                errors.append(err)
-            elif doc_resp:
-                processed_docs.append(doc_resp)
-
-    return DocumentBatchUploadResponse(
-        processed=len(processed_docs),
-        failed=len(errors),
-        documents=processed_docs,
-        errors=errors
+def _source_type_from_filename(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".doc", ".docx"}:
+        return "docx"
+    if suffix == ".txt":
+        return "txt"
+    raise HTTPException(
+        status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        detail="Unsupported file type. Upload .pdf, .docx, .doc, or .txt files.",
     )
 
 
-@router.get("/documents/list")
-async def list_documents():
-    """List all documents — reads from Convex (authoritative) with vector store fallback."""
+async def _upload_to_convex_storage(
+    file_bytes: bytes,
+    content_type: str | None,
+) -> str | None:
+    convex = get_convex_service()
+    if not convex.enabled:
+        return None
+
+    upload_url = await convex.generate_upload_url()
+    if not upload_url:
+        raise HTTPException(status_code=503, detail="Could not generate Convex upload URL")
+
+    # CODEX-FIX: Convex upload URLs are POST endpoints in convex 1.17+ docs.
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(
+            upload_url,
+            content=file_bytes,
+            headers={"Content-Type": content_type or "application/octet-stream"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    storage_id = payload.get("storageId")
+    if not storage_id:
+        raise HTTPException(status_code=503, detail="Convex upload did not return storageId")
+    return storage_id
+
+
+def _validate_public_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="URL must be http or https")
+
+    hostname = parsed.hostname.lower()
+    if hostname in {"localhost", "127.0.0.1", "::1"} or hostname.endswith(".localhost"):
+        raise HTTPException(status_code=400, detail="Private or localhost URLs are not allowed")
+
     try:
-        storage = _get_persistence()
-        docs = await storage.list_documents()
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=400, detail=f"Could not resolve URL host: {exc}") from exc
 
-        # If Convex has data, use it. Otherwise fall back to vector store scan.
-        if docs:
-            return {"documents": docs, "total": len(docs)}
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(status_code=400, detail="Private network URLs are not allowed")
 
-        # CODEX-FIX: temporary legacy fallback remains until route rewrite replaces vector APIs.
-        vs = _get_vector_store()
-        docs = await vs.list_documents()
-        return {"documents": docs, "total": len(docs)}
+    return raw_url
 
-    except Exception as e:
-        logger.error("list_documents_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "LIST_DOCUMENTS_ERROR",
-            "message": str(e)
-        })
+
+async def require_admin_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    if not settings.BACKEND_API_KEY:
+        raise HTTPException(status_code=503, detail="BACKEND_API_KEY is required for admin routes")
+    if not x_api_key or not hmac.compare_digest(x_api_key, settings.BACKEND_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+@router.post("/documents/upload", response_model=UploadResponse, status_code=202)
+async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> UploadResponse:
+    filename = file.filename or "uploaded-document"
+    source_type = _source_type_from_filename(filename)
+    file_bytes = await _read_upload_bytes(file, settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024)
+    sha256 = hashlib.sha256(file_bytes).hexdigest()
+    convex = get_convex_service()
+
+    existing = await convex.get_document_by_hash(sha256)
+    if existing:
+        raise HTTPException(status_code=409, detail="This document has already been uploaded")
+
+    doc_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+
+    await convex.create_document(
+        doc_id=doc_id,
+        name=filename,
+        source_type=source_type,
+        file_size_bytes=len(file_bytes),
+        sha256=sha256,
+    )
+    await convex.create_job(job_id=job_id, source_type=source_type, doc_id=doc_id)
+
+    storage_id = await _upload_to_convex_storage(file_bytes, file.content_type)
+    if storage_id:
+        await convex.update_document(doc_id, storage_id=storage_id)
+
+    background_tasks.add_task(
+        get_document_processor().ingest_file,
+        file_bytes,
+        filename,
+        doc_id,
+        job_id,
+        storage_id,
+    )
+    return UploadResponse(doc_id=doc_id, job_id=job_id, status="processing")
+
+
+@router.post("/documents/upload-url", response_model=UploadResponse, status_code=202)
+async def upload_url(background_tasks: BackgroundTasks, request: UrlUploadRequest) -> UploadResponse:
+    url = _validate_public_url(str(request.url))
+    doc_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    convex = get_convex_service()
+
+    await convex.create_document(
+        doc_id=doc_id,
+        name=urlparse(url).netloc,
+        source_type="webpage",
+        source_url=url,
+    )
+    await convex.create_job(job_id=job_id, source_type="webpage", doc_id=doc_id, source_url=url)
+
+    background_tasks.add_task(ingest_url, url, doc_id, job_id)
+    return UploadResponse(doc_id=doc_id, job_id=job_id, status="processing")
+
+
+@router.post("/query", response_model=QueryResponse)
+async def query_rag(request: QueryRequest) -> QueryResponse:
+    session_id = request.session_id
+    convex = get_convex_service()
+    if not session_id:
+        session_id = await convex.create_session("New Chat") or str(uuid.uuid4())
+
+    result = await get_rag_engine().get_answer(
+        query=request.query,
+        session_id=session_id,
+        filters=request.filters,
+    )
+    return QueryResponse(
+        answer=result["answer"],
+        citations=result["citations"],
+        session_id=session_id,
+        llm_provider=result["llm_provider"],
+        duration_ms=result["duration_ms"],
+    )
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
-    """Delete a document from both vector store and Convex."""
-    try:
-        vs = _get_vector_store()
-        storage = _get_persistence()
-
-        success = await vs.delete_document(doc_id)
-        await storage.delete_document_metadata(doc_id)
-
-        if success:
-            return {"status": "success", "message": f"Document {doc_id} deleted"}
-        else:
-            raise HTTPException(status_code=500, detail={
-                "error_code": "DELETE_FAILED",
-                "message": "Failed to delete document from vector store"
-            })
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("delete_document_error", error=str(e), doc_id=doc_id)
-        raise HTTPException(status_code=500, detail={
-            "error_code": "DELETE_ERROR",
-            "message": str(e)
-        })
+async def delete_document(doc_id: str) -> dict[str, str | bool]:
+    await get_vector_store().delete_by_doc_id(doc_id)
+    await get_convex_service().delete_document(doc_id)
+    return {"deleted": True, "doc_id": doc_id}
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  CHAT SESSIONS
-# ═══════════════════════════════════════════════════════════════════
-
-@router.post("/chat/message")
-async def save_chat_message(request: ChatMessageRequest):
-    """Persist a chat message to Convex."""
-    try:
-        storage = _get_persistence()
-        msg_data = request.model_dump()
-        session_id = msg_data.pop("session_id")
-        await storage.save_chat_message(session_id, msg_data)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error("chat_save_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "CHAT_SAVE_ERROR",
-            "message": str(e)
-        })
+@router.get("/documents")
+@router.get("/documents/list")
+async def list_documents() -> list[dict]:
+    return await get_convex_service().list_documents()
 
 
-@router.get("/chat/history/{session_id}", response_model=ChatSessionResponse)
-async def get_chat_history(session_id: str):
-    """Retrieve full chat history for a session."""
-    try:
-        storage = _get_persistence()
-        session = await storage.get_chat_history(session_id)
-        if not session:
-            return ChatSessionResponse(session_id=session_id, messages=[])
-        return ChatSessionResponse(**session)
-    except Exception as e:
-        logger.error("chat_history_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "CHAT_HISTORY_ERROR",
-            "message": str(e)
-        })
+@router.get("/jobs/{job_id}", response_model=JobResponse)
+async def get_job(job_id: str) -> dict:
+    job = await get_convex_service().get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.post("/chat/sessions")
+async def create_chat_session() -> dict[str, str]:
+    session_id = await get_convex_service().create_session("New Chat") or str(uuid.uuid4())
+    return {"session_id": session_id}
 
 
 @router.get("/chat/sessions")
-async def list_chat_sessions():
-    """List all chat sessions."""
-    try:
-        storage = _get_persistence()
-        sessions = await storage.list_chat_sessions()
-        return {"sessions": sessions}
-    except Exception as e:
-        logger.error("chat_sessions_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "CHAT_SESSIONS_ERROR",
-            "message": str(e)
-        })
+async def list_chat_sessions() -> list[dict]:
+    return await get_convex_service().list_sessions()
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  USER SETTINGS
-# ═══════════════════════════════════════════════════════════════════
+@router.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str) -> dict[str, bool]:
+    await get_convex_service().delete_session(session_id)
+    return {"deleted": True}
+
 
 @router.get("/settings")
-async def get_settings_route():
-    """Retrieve user settings."""
-    try:
-        storage = _get_persistence()
-        return await storage.get_settings()
-    except Exception as e:
-        logger.error("settings_get_error", error=str(e))
-        raise HTTPException(status_code=500, detail={"message": str(e)})
+async def get_settings_route() -> dict:
+    stored = await get_convex_service().get_settings()
+    return stored or {
+        "llmProvider": settings.DEFAULT_LLM_PROVIDER,
+        "llmModel": settings.DEFAULT_LLM_MODEL,
+        "embeddingModel": settings.EMBEDDING_MODEL,
+        "enableVision": settings.ENABLE_VISION,
+        "enableBrowserIngestion": settings.ENABLE_BROWSER_INGESTION,
+        "systemPromptOverride": "",
+    }
 
 
 @router.post("/settings")
-async def save_settings_route(request: UserSettingsRequest):
-    """Persist user settings."""
-    try:
-        storage = _get_persistence()
-        data = {k: v for k, v in request.model_dump().items() if v is not None}
-        await storage.save_settings(data)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error("settings_save_error", error=str(e))
-        raise HTTPException(status_code=500, detail={"message": str(e)})
+async def save_settings_route(request: SettingsRequest) -> dict[str, bool]:
+    payload = {key: value for key, value in request.model_dump().items() if value is not None}
+    await get_convex_service().save_settings(**payload)
+    return {"saved": True}
 
 
-@router.get("/metadata/options", response_model=MetadataOptionsResponse)
-async def metadata_options():
-    """Return enum-backed options for frontend filter and upload controls."""
-    return MetadataOptionsResponse(
-        equipment_types=[
-            MetadataOption(value=enum_item.value, label=enum_item.value.replace("_", " ").title())
-            for enum_item in EquipmentType
-        ],
-        voltage_levels=[
-            MetadataOption(value=enum_item.value, label=enum_item.value)
-            for enum_item in VoltageLevel
-        ],
-        document_types=[
-            MetadataOption(value=enum_item.value, label=enum_item.value.replace("_", " ").title())
-            for enum_item in DocumentType
-        ],
+@router.get("/health", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
+    convex = get_convex_service()
+    vector_stats = await get_vector_store().get_stats()
+    embedder = get_embedding_service()
+    vision = get_vision_service()
+    llm = get_llm_service()
+
+    degraded = vector_stats.get("status") != "healthy" or not convex.enabled
+    return HealthResponse(
+        status="degraded" if degraded else "healthy",
+        version="1.0.0",
+        components={
+            "lancedb": vector_stats,
+            "convex": {"status": "connected" if convex.enabled else "disabled"},
+            "embedding_model": {
+                "status": "loaded" if embedder.is_loaded else "not_loaded",
+                "model": settings.EMBEDDING_MODEL,
+            },
+            "vision_model": {
+                "status": (
+                    "disabled"
+                    if not settings.ENABLE_VISION
+                    else "loaded"
+                    if vision.is_loaded
+                    else "not_loaded"
+                ),
+                "model": settings.VISION_MODEL,
+            },
+            "llm": {"status": "ok", "last_provider": llm.last_provider},
+        },
     )
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  HEALTH & STATS
-# ═══════════════════════════════════════════════════════════════════
+@router.post(
+    "/admin/reindex",
+    response_model=ReindexResponse,
+    dependencies=[Depends(require_admin_api_key)],
+    status_code=202,
+)
+async def admin_reindex(background_tasks: BackgroundTasks) -> ReindexResponse:
+    convex = get_convex_service()
+    if not convex.enabled:
+        raise HTTPException(status_code=503, detail="Convex must be configured for reindex")
 
-@router.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint to verify service status."""
-    try:
-        vs = _get_vector_store()
-        storage = _get_persistence()
-        stats = await vs.get_collection_stats()
+    documents = await convex.list_documents()
+    done_documents = [doc for doc in documents if doc.get("ingestionStatus") == "done"]
+    await get_vector_store().delete_all()
 
-        return HealthResponse(
-            status="healthy",
-            version=settings.APP_VERSION,
-            vector_store=stats,
-            llm_provider=settings.DEFAULT_LLM_PROVIDER,
-            llm_model=settings.DEFAULT_LLM_MODEL,
-            persistence_connected=storage.is_connected,
+    async def _reindex_file_document(document: dict) -> None:
+        doc_id = document["docId"]
+        job_id = str(uuid.uuid4())
+        source_type = document.get("sourceType", "")
+        await convex.create_job(job_id=job_id, source_type=source_type, doc_id=doc_id)
+
+        if source_type == "webpage" and document.get("sourceUrl"):
+            await ingest_url(document["sourceUrl"], doc_id, job_id)
+            return
+
+        download_url = await convex.get_document_download_url(doc_id)
+        if not download_url:
+            await convex.update_job(job_id, status="failed", error_message="Missing Convex storage file")
+            return
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.get(download_url)
+            response.raise_for_status()
+
+        await get_document_processor().ingest_file(
+            response.content,
+            document.get("name") or f"{doc_id}.{source_type}",
+            doc_id,
+            job_id,
+            document.get("storageId"),
         )
-    except Exception as e:
-        logger.error("health_check_failed", error=str(e))
-        raise HTTPException(status_code=503, detail={
-            "error_code": "HEALTH_CHECK_FAILED",
-            "message": "Service is unhealthy",
-            "details": {"error": str(e)}
-        })
 
+    for document in done_documents:
+        background_tasks.add_task(_reindex_file_document, document)
 
-@router.get("/stats")
-async def get_stats():
-    """Get vector store statistics."""
-    try:
-        vs = _get_vector_store()
-        stats = await vs.get_collection_stats()
-        return {
-            "vector_store": stats,
-            "configuration": {
-                "chunk_size": settings.CHUNK_SIZE,
-                "chunk_overlap": settings.CHUNK_OVERLAP,
-                "embedding_model": settings.EMBEDDING_MODEL,
-                "llm_provider": settings.DEFAULT_LLM_PROVIDER,
-                "llm_model": settings.DEFAULT_LLM_MODEL,
-            }
-        }
-    except Exception as e:
-        logger.error("stats_error", error=str(e))
-        raise HTTPException(status_code=500, detail={
-            "error_code": "STATS_ERROR",
-            "message": str(e)
-        })
+    return ReindexResponse(reindex_started=True, document_count=len(done_documents))
