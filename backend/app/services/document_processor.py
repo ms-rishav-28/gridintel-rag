@@ -1,579 +1,419 @@
-"""Document processing service for ingesting POWERGRID documents."""
+"""
+document_processor.py - Parse, chunk, embed, and ingest documents into LanceDB.
+
+Parsing tiers:
+  PDF text    -> pymupdf4llm (primary) -> pdfplumber table fallback -> pytesseract OCR
+  DOCX        -> python-docx (paragraphs + tables as markdown)
+  Webpage     -> web_ingestion.py (separate module)
+"""
+
+# CODEX-FIX: replace simple LangChain loaders with tiered parsing, vision chunks, and LanceDB ingestion.
 
 import asyncio
-import os
-import io
 import hashlib
-import ipaddress
-import re
-import socket
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
-from html.parser import HTMLParser
+import io
+import logging
+import uuid
+from enum import Enum
 from pathlib import Path
-import tempfile
-from urllib.parse import unquote, urlparse
 
-import httpx
-from langchain.schema import Document as LangChainDocument
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    TextLoader,
-)
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from app.core.config import get_settings
-from app.core.exceptions import DocumentProcessingError
-from app.core.logging import get_logger
+from app.services.convex_service import get_convex_service
+from app.services.embedding_service import get_embedding_service
+from app.services.vector_store import ChunkRecord, get_vector_store
+from app.services.vision_service import get_vision_service
 
-logger = get_logger(__name__)
-settings = get_settings()
-
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="docproc")
-
-
-class _HTMLTextExtractor(HTMLParser):
-    """Extract visible text from an HTML page."""
-
-    _block_tags = {
-        "p", "div", "br", "li", "section", "article", "header", "footer",
-        "h1", "h2", "h3", "h4", "h5", "h6", "tr", "td", "th",
-    }
-    _skip_tags = {"script", "style", "noscript", "svg", "canvas"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self._parts: List[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs):
-        tag_name = tag.lower()
-        if tag_name in self._skip_tags:
-            self._skip_depth += 1
-        if self._skip_depth == 0 and tag_name in self._block_tags:
-            self._parts.append("\n")
-
-    def handle_endtag(self, tag: str):
-        tag_name = tag.lower()
-        if tag_name in self._skip_tags and self._skip_depth > 0:
-            self._skip_depth -= 1
-            return
-        if self._skip_depth == 0 and tag_name in self._block_tags:
-            self._parts.append("\n")
-
-    def handle_data(self, data: str):
-        if self._skip_depth > 0:
-            return
-        cleaned = data.strip()
-        if cleaned:
-            self._parts.append(cleaned)
-
-    def get_text(self) -> str:
-        raw_text = " ".join(self._parts)
-        normalized = re.sub(r"\s*\n\s*", "\n", raw_text)
-        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-        normalized = re.sub(r"[ \t]{2,}", " ", normalized)
-        return normalized.strip()
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ProcessedDocument:
-    """Represents a processed document with metadata."""
-    doc_id: str
-    chunks: List[LangChainDocument]
-    metadata: Dict[str, Any]
-    total_chunks: int
-    file_hash: str
-
-
-# ─── Word-boundary patterns for document type detection (#15) ────
-
-_CEA_PATTERNS = [
-    re.compile(r'\bcea\b', re.IGNORECASE),
-    re.compile(r'central\s+electricity\s+authority', re.IGNORECASE),
-]
-_IT_CIRCULAR_PATTERNS = [
-    re.compile(r'\bit\s+circular\b', re.IGNORECASE),
-    re.compile(r'\bcircular\s+no\b', re.IGNORECASE),
-    re.compile(r'\bIT[-_]Circular\b', re.IGNORECASE),
-]
-_MANUAL_PATTERNS = [
-    re.compile(r'\bmanual\b', re.IGNORECASE),
-    re.compile(r'\btechnical\s+manual\b', re.IGNORECASE),
-    re.compile(r'\bmaintenance\s+manual\b', re.IGNORECASE),
-    re.compile(r'\boperation\s+manual\b', re.IGNORECASE),
-]
+class PDFParseStrategy(str, Enum):
+    FAST = "fast"
+    THOROUGH = "thorough"
+    OCR = "ocr"
 
 
 class DocumentProcessor:
-    """Handles document loading, processing, and chunking."""
-    
+    HEADERS_TO_SPLIT = [("#", "h1"), ("##", "h2"), ("###", "h3")]
+    CHUNK_SIZE = 1500
+    CHUNK_OVERLAP = 200
+
     def __init__(self):
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
+        self._settings = get_settings()
+        self._splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.CHUNK_SIZE,
+            chunk_overlap=self.CHUNK_OVERLAP,
             length_function=len,
-            separators=["\n\n", "\n", ".", "!", "?", ";", ",", " ", ""],
         )
-        self.upload_dir = Path(settings.UPLOAD_DIR)
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
-    
-    def _compute_file_hash(self, file_content: bytes) -> str:
-        """Compute SHA-256 hash of file content."""
-        return hashlib.sha256(file_content).hexdigest()
-    
-    def _detect_document_type(self, filename: str, content: bytes) -> str:
-        """Detect document type from filename and first bytes of content.
+        self._header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=self.HEADERS_TO_SPLIT,
+            strip_headers=False,
+        )
 
-        Fix #15: Uses word-boundary regex instead of fragile substring matching.
-        Also performs content-based detection by scanning the first 2000 bytes
-        of the extracted text for authoritative keywords.
-        """
-        ext = Path(filename).suffix.lower()
-
-        # Not applicable to plain text
-        if ext == '.txt':
-            return 'TEXT_DOCUMENT'
-
-        # Check filename first using word-boundary patterns
-        for pattern in _CEA_PATTERNS:
-            if pattern.search(filename):
-                return 'CEA_GUIDELINE'
-
-        for pattern in _IT_CIRCULAR_PATTERNS:
-            if pattern.search(filename):
-                return 'IT_CIRCULAR'
-
-        for pattern in _MANUAL_PATTERNS:
-            if pattern.search(filename):
-                return 'TECHNICAL_MANUAL'
-
-        # Content-based detection: scan first 2000 bytes
-        try:
-            text_preview = content[:2000].decode('utf-8', errors='ignore')
-        except Exception:
-            text_preview = ""
-
-        if text_preview:
-            for pattern in _CEA_PATTERNS:
-                if pattern.search(text_preview):
-                    return 'CEA_GUIDELINE'
-
-            for pattern in _IT_CIRCULAR_PATTERNS:
-                if pattern.search(text_preview):
-                    return 'IT_CIRCULAR'
-
-            for pattern in _MANUAL_PATTERNS:
-                if pattern.search(text_preview):
-                    return 'TECHNICAL_MANUAL'
-
-        # Default for PDF/DOCX when no keywords match
-        return 'TECHNICAL_MANUAL'
-    
-    def _extract_metadata(self, filename: str, content: bytes, doc_type: str) -> Dict[str, Any]:
-        """Extract metadata from document filename and content."""
-        metadata = {
-            'source': filename,
-            'doc_type': doc_type,
-            'file_size': len(content),
-            'file_hash': self._compute_file_hash(content),
-        }
-        
-        # Extract potential equipment types from filename
-        equipment_keywords = {
-            'transformer': 'TRANSFORMER',
-            'breaker': 'CIRCUIT_BREAKER',
-            'cb': 'CIRCUIT_BREAKER',
-            'line': 'TRANSMISSION_LINE',
-            'bay': 'SUBSTATION_BAY',
-            'protection': 'PROTECTION_SYSTEM',
-            'relay': 'PROTECTION_RELAY',
-            'insulator': 'INSULATOR',
-            'busbar': 'BUSBAR',
-            'ct': 'CURRENT_TRANSFORMER',
-            'pt': 'POTENTIAL_TRANSFORMER',
-            'vt': 'VOLTAGE_TRANSFORMER',
-        }
-        
-        filename_lower = filename.lower()
-        for keyword, equipment_type in equipment_keywords.items():
-            # Use word-boundary matching for equipment keywords too
-            if re.search(rf'\b{re.escape(keyword)}\b', filename_lower):
-                metadata['equipment_type'] = equipment_type
-                break
-        
-        # Extract voltage level if present (e.g., 220kV, 400kV)
-        voltage_pattern = r'(\d+)\s*kV'
-        voltage_matches = re.findall(voltage_pattern, filename, re.IGNORECASE)
-        if voltage_matches:
-            metadata['voltage_level'] = f"{voltage_matches[0]} kV"
-        
-        return metadata
-
-    def _validate_source_url(self, url: str) -> str:
-        """Validate URL format and block local/private network targets."""
-        normalized_url = url.strip()
-        parsed = urlparse(normalized_url)
-
-        if parsed.scheme not in {"http", "https"}:
-            raise DocumentProcessingError(
-                "Only HTTP/HTTPS URLs are supported",
-                details={"url": url},
-            )
-
-        if not parsed.hostname:
-            raise DocumentProcessingError(
-                "URL must include a valid hostname",
-                details={"url": url},
-            )
-
-        hostname = parsed.hostname.lower()
-        blocked_hostnames = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
-        if hostname in blocked_hostnames or hostname.endswith(".local"):
-            raise DocumentProcessingError(
-                "Local or internal URLs are not allowed",
-                details={"url": normalized_url},
-            )
-
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        try:
-            addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-        except socket.gaierror as e:
-            raise DocumentProcessingError(
-                "Unable to resolve URL hostname",
-                details={"url": normalized_url, "error": str(e)},
-            )
-
-        for info in addr_info:
-            ip_value = info[4][0]
-            try:
-                ip_obj = ipaddress.ip_address(ip_value)
-            except ValueError:
-                continue
-
-            if (
-                ip_obj.is_loopback
-                or ip_obj.is_private
-                or ip_obj.is_link_local
-                or ip_obj.is_multicast
-                or ip_obj.is_reserved
-                or ip_obj.is_unspecified
-            ):
-                raise DocumentProcessingError(
-                    "URL resolves to a non-public address and cannot be ingested",
-                    details={"url": normalized_url, "ip": ip_value},
-                )
-
-        return normalized_url
-
-    def _build_filename_from_url(self, url: str, content_type: str) -> str:
-        """Infer a local filename from URL path and content type."""
-        parsed = urlparse(url)
-        raw_name = Path(unquote(parsed.path)).name
-        default_stem = f"webpage-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:10]}"
-        base_name = raw_name or default_stem
-
-        extension = Path(base_name).suffix.lower()
-        if extension in {".pdf", ".docx", ".doc", ".txt", ".html", ".htm"}:
-            return base_name
-
-        content_type_value = content_type.split(";")[0].strip().lower()
-        extension_map = {
-            "application/pdf": ".pdf",
-            "application/msword": ".doc",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-            "text/plain": ".txt",
-            "text/html": ".html",
-        }
-        inferred_extension = extension_map.get(content_type_value)
-        if inferred_extension:
-            if extension:
-                return f"{Path(base_name).stem}{inferred_extension}"
-            return f"{base_name}{inferred_extension}"
-
-        return base_name
-
-    def _is_html_content(self, filename: str, content_type: str) -> bool:
-        """Check if remote content should be parsed as HTML."""
-        extension = Path(filename).suffix.lower()
-        content_type_value = content_type.split(";")[0].strip().lower()
-        return extension in {".html", ".htm"} or content_type_value == "text/html"
-
-    def _is_supported_web_content(self, filename: str, content_type: str) -> bool:
-        """Validate downloadable content types accepted by ingestion pipeline."""
-        extension = Path(filename).suffix.lower()
-        content_type_value = content_type.split(";")[0].strip().lower()
-
-        supported_extensions = {".pdf", ".docx", ".doc", ".txt", ".html", ".htm"}
-        supported_types = {
-            "application/pdf",
-            "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "text/plain",
-            "text/html",
-        }
-
-        return extension in supported_extensions or content_type_value in supported_types
-
-    def _extract_html_title(self, content: bytes) -> Optional[str]:
-        """Extract page title from HTML bytes."""
-        decoded = content.decode("utf-8", errors="ignore")
-        match = re.search(r"<title[^>]*>(.*?)</title>", decoded, re.IGNORECASE | re.DOTALL)
-        if not match:
-            return None
-
-        title = re.sub(r"\s+", " ", match.group(1)).strip()
-        return title[:120] if title else None
-
-    def _extract_text_from_html(self, content: bytes) -> str:
-        """Convert HTML bytes into readable text."""
-        decoded = content.decode("utf-8", errors="ignore")
-        parser = _HTMLTextExtractor()
-        parser.feed(decoded)
-        parser.close()
-        return parser.get_text()
-    
-    def _load_document(self, file_path: Path, metadata: Dict[str, Any]) -> List[LangChainDocument]:
-        """Load document using appropriate loader."""
-        ext = file_path.suffix.lower()
-        
-        try:
-            if ext == '.pdf':
-                loader = PyPDFLoader(str(file_path))
-            elif ext in ['.docx', '.doc']:
-                loader = Docx2txtLoader(str(file_path))
-            elif ext == '.txt':
-                loader = TextLoader(str(file_path), encoding='utf-8')
-            else:
-                raise DocumentProcessingError(
-                    f"Unsupported file type: {ext}",
-                    details={"file_path": str(file_path)}
-                )
-            
-            documents = loader.load()
-            
-            # Add metadata to each document
-            for doc in documents:
-                doc.metadata.update(metadata)
-            
-            return documents
-            
-        except Exception as e:
-            logger.error("document_load_failed", error=str(e), file_path=str(file_path))
-            raise DocumentProcessingError(
-                f"Failed to load document: {str(e)}",
-                details={"file_path": str(file_path), "error": str(e)}
-            )
-    
-    def _process_file_sync(
+    async def ingest_file(
         self,
+        file_bytes: bytes,
         filename: str,
-        content: bytes,
-        custom_metadata: Optional[Dict[str, Any]] = None,
-        precomputed_hash: Optional[str] = None,
-    ) -> ProcessedDocument:
-        """Synchronous file processing — runs inside thread pool."""
-        logger.info("processing_document", filename=filename, size=len(content))
-
-        # Detect document type
-        doc_type = self._detect_document_type(filename, content)
-
-        # Extract metadata
-        metadata = self._extract_metadata(filename, content, doc_type)
-        # Use pre-computed hash if provided, avoiding double SHA-256 (fix audit #2)
-        if precomputed_hash:
-            metadata['file_hash'] = precomputed_hash
-        if custom_metadata:
-            metadata.update(custom_metadata)
-
-        # Save to temp file for processing
+        doc_id: str,
+        job_id: str,
+        storage_id: str | None = None,
+    ) -> dict[str, int | str | None]:
+        """
+        Main entry point for file ingestion.
+        Returns { chunk_count, image_count, error }.
+        Updates Convex job and document status throughout.
+        """
+        convex = get_convex_service()
         ext = Path(filename).suffix.lower()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
+        source_type = self._source_type_from_extension(ext)
 
         try:
-            # Load document
-            documents = self._load_document(tmp_path, metadata)
+            await convex.update_job(
+                job_id,
+                status="processing",
+                progress_message="Parsing document...",
+            )
+            await convex.update_document(
+                doc_id,
+                ingestion_status="processing",
+                storage_id=storage_id,
+            )
 
-            # Split into chunks
-            chunks = self.text_splitter.split_documents(documents)
+            if ext == ".pdf":
+                text_md, images = await self._parse_pdf(file_bytes)
+            elif ext in (".docx", ".doc"):
+                text_md, images = await self._parse_docx(file_bytes)
+            elif ext == ".txt":
+                text_md = file_bytes.decode("utf-8", errors="replace")
+                images = []
+            else:
+                raise ValueError(f"Unsupported file type: {ext}")
 
-            # Add chunk metadata
-            for i, chunk in enumerate(chunks):
-                chunk.metadata['chunk_index'] = i
-                chunk.metadata['total_chunks'] = len(chunks)
-                chunk.metadata['chunk_id'] = f"{metadata['file_hash']}_{i}"
+            await convex.update_job(job_id, progress_message="Chunking and embedding...")
+            text_chunks = await self._chunk_and_embed(
+                text_md,
+                doc_id,
+                filename,
+                source_type=source_type,
+            )
 
-            # Create document ID
-            doc_id = metadata['file_hash'][:16]
+            image_chunks: list[ChunkRecord] = []
+            if images and self._settings.ENABLE_VISION:
+                await convex.update_job(
+                    job_id,
+                    progress_message=f"Describing {len(images)} images...",
+                    total_chunks=len(text_chunks) + len(images),
+                )
+                image_chunks = await self._process_images(images, doc_id, filename, source_type)
 
+            all_chunks = text_chunks + image_chunks
+            await convex.update_job(job_id, progress_message="Indexing into vector store...")
+            await get_vector_store().add_chunks(all_chunks)
+
+            await convex.update_document(
+                doc_id,
+                ingestion_status="done",
+                chunk_count=len(all_chunks),
+                image_count=len(image_chunks),
+            )
+            await convex.update_job(
+                job_id,
+                status="done",
+                progress_message="Done",
+                total_chunks=len(all_chunks),
+                processed_chunks=len(all_chunks),
+            )
             logger.info(
-                "document_processed",
-                doc_id=doc_id,
-                filename=filename,
-                chunks=len(chunks),
-                doc_type=doc_type,
+                "Ingested %s: %s text chunks, %s image chunks",
+                filename,
+                len(text_chunks),
+                len(image_chunks),
             )
+            return {
+                "chunk_count": len(all_chunks),
+                "image_count": len(image_chunks),
+                "error": None,
+            }
 
-            return ProcessedDocument(
-                doc_id=doc_id,
-                chunks=chunks,
-                metadata=metadata,
-                total_chunks=len(chunks),
-                file_hash=metadata['file_hash'],
+        except Exception as exc:
+            logger.error("Document ingestion failed for %s: %s", filename, exc, exc_info=True)
+            await convex.update_document(
+                doc_id,
+                ingestion_status="failed",
+                error_message=str(exc),
             )
+            await convex.update_job(job_id, status="failed", error_message=str(exc))
+            return {"chunk_count": 0, "image_count": 0, "error": str(exc)}
 
-        finally:
-            # Cleanup temp file
-            if tmp_path.exists():
-                tmp_path.unlink()
+    def _source_type_from_extension(self, ext: str) -> str:
+        if ext == ".pdf":
+            return "pdf"
+        if ext in (".docx", ".doc"):
+            return "docx"
+        if ext == ".txt":
+            return "txt"
+        return ext.lstrip(".")
 
-    async def process_file(
-        self,
-        filename: str,
-        content: bytes,
-        custom_metadata: Optional[Dict[str, Any]] = None,
-        precomputed_hash: Optional[str] = None,
-    ) -> ProcessedDocument:
-        """Process a file into chunks ready for vector embedding (non-blocking).
-        
-        The heavy lifting (PDF parsing, text splitting) is offloaded to a
-        thread pool so the event loop is not blocked.
+    # -- PDF parsing ------------------------------------------------------------
 
-        Args:
-            precomputed_hash: If the caller already computed SHA-256, pass it
-                here to skip redundant hashing (saves ~200ms on 50MB files).
-        """
+    async def _parse_pdf(self, pdf_bytes: bytes) -> tuple[str, list[dict]]:
+        return await asyncio.to_thread(self._parse_pdf_sync, pdf_bytes)
+
+    def _parse_pdf_sync(self, pdf_bytes: bytes) -> tuple[str, list[dict]]:
+        import fitz
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._process_file_sync, filename, content, custom_metadata, precomputed_hash,
+            total_chars = sum(len(page.get_text()) for page in doc)
+            avg_chars_per_page = total_chars / max(len(doc), 1)
+            strategy = (
+                PDFParseStrategy.OCR
+                if avg_chars_per_page < 100
+                else PDFParseStrategy.THOROUGH
             )
-        except DocumentProcessingError:
-            raise
-        except Exception as e:
-            logger.error("document_processing_failed", error=str(e), filename=filename)
-            raise DocumentProcessingError(
-                f"Failed to process document: {str(e)}",
-                details={"filename": filename, "error": str(e)}
-            )
-
-    async def process_url(
-        self,
-        url: str,
-        custom_metadata: Optional[Dict[str, Any]] = None,
-        verify_ssl: bool = True,
-    ) -> ProcessedDocument:
-        """Fetch content from a URL and process it into vector-ready chunks."""
-        safe_url = self._validate_source_url(url)
-        logger.info("processing_url_document", url=safe_url)
-
-        timeout = httpx.Timeout(timeout=25.0, connect=10.0, read=20.0)
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=timeout,
-                follow_redirects=True,
-                max_redirects=5,
-                verify=verify_ssl,
-                headers={"User-Agent": "POWERGRID-RAG-Ingestor/1.0"},
-            ) as client:
-                response = await client.get(safe_url)
-        except httpx.HTTPError as e:
-            logger.error("url_fetch_failed", url=safe_url, error=str(e))
-            raise DocumentProcessingError(
-                "Failed to fetch content from URL",
-                details={"url": safe_url, "error": str(e)},
+            logger.info(
+                "PDF parse strategy selected: %s (%s chars/page avg, %s pages)",
+                strategy.value,
+                round(avg_chars_per_page),
+                len(doc),
             )
 
-        if response.status_code >= 400:
-            raise DocumentProcessingError(
-                f"URL returned HTTP {response.status_code}",
-                details={"url": safe_url, "status_code": response.status_code},
-            )
-
-        content = response.content
-        if not content:
-            raise DocumentProcessingError(
-                "URL returned empty content",
-                details={"url": safe_url},
-            )
-
-        max_size_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        if len(content) > max_size_bytes:
-            raise DocumentProcessingError(
-                f"URL content exceeds {settings.MAX_UPLOAD_SIZE_MB}MB limit",
-                details={"url": safe_url, "size": len(content)},
-            )
-
-        content_type = response.headers.get("content-type", "").lower()
-        filename = self._build_filename_from_url(safe_url, content_type)
-
-        if not self._is_supported_web_content(filename, content_type):
-            raise DocumentProcessingError(
-                "Unsupported URL content type. Supported: HTML, TXT, PDF, DOCX, DOC",
-                details={"url": safe_url, "content_type": content_type, "filename": filename},
-            )
-
-        metadata: Dict[str, Any] = {"source_url": safe_url}
-        if custom_metadata:
-            metadata.update(custom_metadata)
-
-        if self._is_html_content(filename, content_type):
-            extracted_text = self._extract_text_from_html(content)
-            if not extracted_text:
-                raise DocumentProcessingError(
-                    "The URL does not contain readable text content",
-                    details={"url": safe_url},
-                )
-
-            page_title = self._extract_html_title(content)
-            title_slug = ""
-            if page_title:
-                title_slug = re.sub(r"[^A-Za-z0-9]+", "-", page_title).strip("-").lower()
-
-            if not title_slug:
-                title_slug = Path(filename).stem or f"webpage-{hashlib.sha256(safe_url.encode('utf-8')).hexdigest()[:10]}"
-
-            filename = f"{title_slug[:80]}.txt"
-
-            header_lines = [f"Source URL: {safe_url}"]
-            if page_title:
-                header_lines.append(f"Page Title: {page_title}")
-            text_payload = "\n".join(header_lines) + "\n\n" + extracted_text
-            content = text_payload.encode("utf-8")
-
-            if "doc_type" not in metadata:
-                metadata["doc_type"] = "TEXT_DOCUMENT"
-
-        return await self.process_file(filename, content, metadata)
-    
-    async def process_multiple_files(
-        self,
-        files: List[tuple[str, bytes]]
-    ) -> List[ProcessedDocument]:
-        """Process multiple files concurrently."""
-        tasks = []
-        for filename, content in files:
-            tasks.append(self.process_file(filename, content))
-
-        results: List[ProcessedDocument] = []
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, outcome in enumerate(outcomes):
-            if isinstance(outcome, Exception):
-                logger.error(
-                    "batch_processing_error",
-                    filename=files[i][0],
-                    error=str(outcome),
-                )
+            if strategy == PDFParseStrategy.OCR:
+                text_md = self._ocr_pdf_with_pymupdf(pdf_bytes)
             else:
-                results.append(outcome)
+                import pymupdf4llm
 
-        return results
+                text_md = pymupdf4llm.to_markdown(doc)
+                try:
+                    text_md = self._merge_pdfplumber_tables(pdf_bytes, text_md)
+                except Exception as exc:
+                    logger.warning("pdfplumber table merge failed: %s", exc)
+
+            images: list[dict] = []
+            for page_num, page in enumerate(doc, start=1):
+                page_text = page.get_text()[:1000]
+                for img_index, img in enumerate(page.get_images(full=True)):
+                    xref = img[0]
+                    try:
+                        img_data = doc.extract_image(xref)
+                        if img_data and img_data.get("image"):
+                            images.append(
+                                {
+                                    "bytes": img_data["image"],
+                                    "page_number": page_num,
+                                    "image_index": img_index,
+                                    "context_text": page_text,
+                                }
+                            )
+                    except Exception:
+                        continue
+
+            return text_md, images
+        finally:
+            doc.close()
+
+    def _ocr_pdf_with_pymupdf(self, pdf_bytes: bytes) -> str:
+        """OCR pages one at a time to avoid loading large scanned PDFs into memory."""
+        try:
+            import fitz
+            import pytesseract
+            from PIL import Image
+
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            pages: list[str] = []
+            try:
+                for page_index, page in enumerate(doc, start=1):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    image = Image.open(io.BytesIO(pix.tobytes("png")))
+                    text = pytesseract.image_to_string(image, lang="eng")
+                    pages.append(f"## Page {page_index}\n\n{text}")
+            finally:
+                doc.close()
+            return "\n\n".join(pages)
+        except Exception as exc:
+            logger.warning("PDF OCR failed: %s", exc)
+            return ""
+
+    def _merge_pdfplumber_tables(self, pdf_bytes: bytes, base_md: str) -> str:
+        """Extract tables via pdfplumber and append as GitHub-flavored markdown."""
+        import pdfplumber
+
+        table_sections: list[str] = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                tables = page.extract_tables()
+                for table_index, table in enumerate(tables):
+                    if not table or not table[0]:
+                        continue
+                    header = " | ".join(str(cell or "") for cell in table[0])
+                    sep = " | ".join(["---"] * len(table[0]))
+                    rows = [
+                        " | ".join(str(cell or "") for cell in row)
+                        for row in table[1:]
+                    ]
+                    table_md = f"\n### Table {table_index + 1} (page {page_num})\n\n"
+                    table_md += f"| {header} |\n| {sep} |\n"
+                    table_md += "\n".join(f"| {row} |" for row in rows)
+                    table_sections.append(table_md)
+        if table_sections:
+            return base_md + "\n\n## Extracted Tables\n\n" + "\n\n".join(table_sections)
+        return base_md
+
+    # -- DOCX parsing -----------------------------------------------------------
+
+    async def _parse_docx(self, docx_bytes: bytes) -> tuple[str, list[dict]]:
+        return await asyncio.to_thread(self._parse_docx_sync, docx_bytes)
+
+    def _parse_docx_sync(self, docx_bytes: bytes) -> tuple[str, list[dict]]:
+        import docx
+
+        doc = docx.Document(io.BytesIO(docx_bytes))
+        parts: list[str] = []
+        heading_map = {
+            "Heading 1": "#",
+            "Heading 2": "##",
+            "Heading 3": "###",
+            "Heading 4": "####",
+        }
+
+        for para in doc.paragraphs:
+            style_name = para.style.name if para.style else ""
+            prefix = heading_map.get(style_name, "")
+            text = para.text.strip()
+            if not text:
+                continue
+            parts.append(f"{prefix} {text}" if prefix else text)
+
+        for table in doc.tables:
+            rows_md: list[str] = []
+            for row_index, row in enumerate(table.rows):
+                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                rows_md.append("| " + " | ".join(cells) + " |")
+                if row_index == 0:
+                    rows_md.append("| " + " | ".join(["---"] * len(cells)) + " |")
+            parts.append("\n".join(rows_md))
+
+        images: list[dict] = []
+        image_index = 0
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
+                try:
+                    images.append(
+                        {
+                            "bytes": rel.target_part.blob,
+                            "page_number": 1,
+                            "image_index": image_index,
+                            "context_text": "",
+                        }
+                    )
+                    image_index += 1
+                except Exception:
+                    continue
+
+        return "\n\n".join(parts), images
+
+    # -- Chunking + embedding ---------------------------------------------------
+
+    async def _chunk_and_embed(
+        self,
+        text_md: str,
+        doc_id: str,
+        doc_name: str,
+        source_type: str,
+        source_url: str | None = None,
+    ) -> list[ChunkRecord]:
+        if not text_md.strip():
+            logger.warning("Empty text extracted for %s", doc_name)
+            return []
+
+        header_chunks = self._header_splitter.split_text(text_md)
+        raw_chunks: list[dict[str, str | None]] = []
+        for header_chunk in header_chunks:
+            sub_chunks = self._splitter.split_text(header_chunk.page_content)
+            for sub_chunk in sub_chunks:
+                heading = " > ".join(
+                    value for _, value in sorted(header_chunk.metadata.items()) if value
+                ) or None
+                raw_chunks.append({"text": sub_chunk, "heading": heading})
+
+        if not raw_chunks:
+            for sub_chunk in self._splitter.split_text(text_md):
+                raw_chunks.append({"text": sub_chunk, "heading": None})
+
+        texts = [str(chunk["text"]) for chunk in raw_chunks]
+        vectors = await get_embedding_service().async_encode_dense(texts)
+
+        records: list[ChunkRecord] = []
+        for index, (chunk, vector) in enumerate(zip(raw_chunks, vectors)):
+            records.append(
+                ChunkRecord(
+                    chunk_id=str(uuid.uuid4()),
+                    doc_id=doc_id,
+                    doc_name=doc_name,
+                    source_type=source_type,
+                    source_url=source_url,
+                    page_number=None,
+                    chunk_index=index,
+                    section_heading=chunk["heading"],
+                    chunk_type="text",
+                    content=str(chunk["text"]),
+                    vector=vector,
+                )
+            )
+        return records
+
+    # -- Image processing -------------------------------------------------------
+
+    async def _process_images(
+        self,
+        images: list[dict],
+        doc_id: str,
+        doc_name: str,
+        source_type: str,
+    ) -> list[ChunkRecord]:
+        vision = get_vision_service()
+        embedder = get_embedding_service()
+        records: list[ChunkRecord] = []
+
+        for image in images:
+            description = await vision.describe_image(
+                image_bytes=image["bytes"],
+                page_number=image["page_number"],
+                image_index=image["image_index"],
+                context_text=image.get("context_text", ""),
+            )
+            if not description:
+                continue
+            vector = (await embedder.async_encode_dense([description]))[0]
+            records.append(
+                ChunkRecord(
+                    chunk_id=str(uuid.uuid4()),
+                    doc_id=doc_id,
+                    doc_name=doc_name,
+                    source_type=source_type,
+                    source_url=None,
+                    page_number=image["page_number"],
+                    chunk_index=image["image_index"],
+                    section_heading=None,
+                    chunk_type="image_description",
+                    content=description,
+                    vector=vector,
+                )
+            )
+
+        return records
+
+    @staticmethod
+    def compute_sha256(file_bytes: bytes) -> str:
+        return hashlib.sha256(file_bytes).hexdigest()
 
 
-# Singleton instance
-document_processor = DocumentProcessor()
+_processor: DocumentProcessor | None = None
+
+
+def get_document_processor() -> DocumentProcessor:
+    global _processor
+    if _processor is None:
+        _processor = DocumentProcessor()
+    return _processor
