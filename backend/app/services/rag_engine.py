@@ -1,258 +1,307 @@
-"""RAG (Retrieval-Augmented Generation) engine for POWERGRID queries."""
+"""RAG engine for POWERGRID SmartOps hybrid retrieval and answer generation."""
+
+# CODEX-FIX: replace legacy LangChain RAG with LanceDB hybrid search, reranking, and Convex memory.
 
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
-from dataclasses import dataclass
+import asyncio
+import json
+import logging
+import re
+import threading
+import time
+from typing import Any
 
-from app.core.config import get_settings
 from app.core.exceptions import RAGQueryError
-from app.core.logging import get_logger, log_execution_time
+from app.services.convex_service import get_convex_service
+from app.services.embedding_service import get_embedding_service
+from app.services.llm_service import get_llm_service
+from app.services.vector_store import get_vector_store
 
-if TYPE_CHECKING:
-    from app.services.vector_store import VectorStoreService
-    from app.services.llm_service import LLMService
-
-logger = get_logger(__name__)
-settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RAGResponse:
-    """Complete RAG response with answer and citations."""
-    answer: str
-    citations: List[Dict[str, Any]]
-    confidence: float
-    model_used: str
-    provider: str
-    query_time_ms: float
-    documents_retrieved: int
-    is_insufficient: bool
+SYSTEM_PROMPT = """You are POWERGRID SmartOps Assistant, an expert AI on Indian power grid operations,
+regulations, and infrastructure. You answer questions strictly based on the provided
+context documents. Rules:
+1. If the context contains the answer, cite the source for every factual claim:
+   [Source: {doc_name}, page {page_number}].
+2. If a context chunk is labelled [IMAGE - ...], treat it as a diagram or chart and
+   reference it explicitly: "As shown in the diagram on page X..."
+3. If the context does not contain enough information, say exactly:
+   "I couldn't find enough information in the knowledge base to answer this question."
+   Do not guess or hallucinate.
+4. Be concise but complete. Use markdown for structured answers."""
+
+
+class CrossEncoderReranker:
+    """Lazy, thread-safe cross-encoder reranker."""
+
+    MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    def __init__(self):
+        self._model = None
+        self._lock = threading.Lock()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    def _load(self):
+        with self._lock:
+            if self._model is not None:
+                return
+            logger.info("Loading reranker model %s", self.MODEL_NAME)
+            from sentence_transformers import CrossEncoder
+
+            self._model = CrossEncoder(self.MODEL_NAME)
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        if not pairs:
+            return []
+        self._load()
+        scores = self._model.predict(pairs)
+        if hasattr(scores, "tolist"):
+            return [float(score) for score in scores.tolist()]
+        return [float(score) for score in scores]
+
+    async def async_predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        return await asyncio.to_thread(self.predict, pairs)
+
+
+_reranker: CrossEncoderReranker | None = None
+
+
+def get_reranker() -> CrossEncoderReranker:
+    global _reranker
+    if _reranker is None:
+        _reranker = CrossEncoderReranker()
+    return _reranker
 
 
 class RAGEngine:
-    """Main RAG engine orchestrating retrieval and generation."""
-    
-    def __init__(self):
-        # Lazy imports — avoid triggering heavy service init at module load time
-        self._vector_store: VectorStoreService | None = None
-        self._llm_service: LLMService | None = None
+    """Coordinates query rewriting, retrieval, reranking, LLM calls, and persistence."""
 
-    @property
-    def vector_store(self) -> VectorStoreService:
-        if self._vector_store is None:
-            from app.services.vector_store import vector_store
-            self._vector_store = vector_store
-        return self._vector_store
-
-    @property
-    def llm_service(self) -> LLMService:
-        if self._llm_service is None:
-            from app.services.llm_service import llm_service
-            self._llm_service = llm_service
-        return self._llm_service
-    
-    def _build_filters(
+    async def get_answer(
         self,
-        equipment_type: Optional[str] = None,
-        voltage_level: Optional[str] = None,
-        doc_types: Optional[List[str]] = None
-    ) -> Optional[Dict[str, Any]]:
-        """Build metadata filters for vector search."""
-        clauses: List[Dict[str, Any]] = []
+        query: str,
+        session_id: str | None = None,
+        filters: Any | None = None,
+    ) -> dict[str, Any]:
+        started = time.time()
+        convex = get_convex_service()
 
-        if equipment_type:
-            clauses.append({'equipment_type': equipment_type.upper()})
+        try:
+            history = []
+            if session_id:
+                history = await convex.get_last_n_messages(session_id, 6)
+                history = list(reversed(history))
 
-        if voltage_level:
-            clauses.append({'voltage_level': voltage_level})
+            rewrites = await self._rewrite_queries(query, history)
+            search_queries = self._dedupe_queries([query, *rewrites])[:4]
+            where = self._build_filter_clause(filters)
 
-        if doc_types:
-            if len(doc_types) == 1:
-                clauses.append({'doc_type': doc_types[0]})
-            else:
-                clauses.append({'doc_type': {'$in': doc_types}})
+            candidates = await self._retrieve_candidates(search_queries, where)
+            top_20 = sorted(
+                candidates.values(),
+                key=lambda row: float(row.get("rrf_score", 0.0)),
+                reverse=True,
+            )[:20]
+            top_5 = await self._rerank(query, top_20)
 
-        if not clauses:
+            context = self._format_context(top_5)
+            conversation = self._format_history(history)
+            user_prompt = (
+                f"[CONVERSATION HISTORY]\n{conversation or 'No prior messages.'}\n\n"
+                f"[RETRIEVED CONTEXT]\n{context or 'No context retrieved.'}\n\n"
+                f"User question: {query}"
+            )
+
+            answer, provider = await get_llm_service().complete(
+                [{"role": "user", "content": user_prompt}],
+                system=SYSTEM_PROMPT,
+            )
+
+            citations = self._build_citations(top_5)
+            duration_ms = round((time.time() - started) * 1000)
+
+            if session_id:
+                await convex.append_message(session_id, "user", query)
+                await convex.append_message(
+                    session_id,
+                    "assistant",
+                    answer,
+                    citations=citations,
+                    llm_provider=provider,
+                    duration_ms=duration_ms,
+                )
+
+            return {
+                "answer": answer,
+                "citations": citations,
+                "llm_provider": provider,
+                "duration_ms": duration_ms,
+            }
+
+        except Exception as exc:
+            logger.error("RAG query failed: %s", exc, exc_info=True)
+            raise RAGQueryError(f"Query failed: {exc}", query=query) from exc
+
+    async def _rewrite_queries(self, query: str, history: list[dict[str, Any]]) -> list[str]:
+        prompt = (
+            "Given this conversation history and user query, produce 3 alternative "
+            "search queries as a JSON array. Be concise.\n\n"
+            f"Conversation history:\n{self._format_history(history) or 'None'}\n\n"
+            f"Query: {query}"
+        )
+        try:
+            text, _ = await get_llm_service().complete(
+                [{"role": "user", "content": prompt}],
+                system="Return only valid JSON.",
+            )
+            parsed = self._parse_json_array(text)
+            return [item.strip() for item in parsed if item.strip() and item.strip() != query]
+        except Exception as exc:
+            logger.warning("Query rewriting failed, using original query only: %s", exc)
+            return []
+
+    def _parse_json_array(self, text: str) -> list[str]:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\[[\s\S]*\]", text)
+            if not match:
+                return []
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed[:3]]
+
+    def _dedupe_queries(self, queries: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for item in queries:
+            normalized = " ".join(item.split()).lower()
+            if item.strip() and normalized not in seen:
+                seen.add(normalized)
+                deduped.append(item.strip())
+        return deduped
+
+    async def _retrieve_candidates(
+        self,
+        search_queries: list[str],
+        where: str | None,
+    ) -> dict[str, dict[str, Any]]:
+        embedder = get_embedding_service()
+        store = get_vector_store()
+        candidates: dict[str, dict[str, Any]] = {}
+
+        for search_query in search_queries:
+            dense_vec, _sparse = await embedder.async_encode_query(search_query)
+            rows = await store.hybrid_search(search_query, dense_vec, top_k=20, where=where)
+            for row in rows:
+                chunk_id = row.get("chunk_id")
+                if not chunk_id:
+                    continue
+                current = candidates.get(chunk_id)
+                if current is None:
+                    candidates[chunk_id] = row
+                else:
+                    current["rrf_score"] = max(
+                        float(current.get("rrf_score", 0.0)),
+                        float(row.get("rrf_score", 0.0)),
+                    )
+        return candidates
+
+    async def _rerank(self, query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        pairs = [(query, str(row.get("content", ""))) for row in rows]
+        scores = await get_reranker().async_predict(pairs)
+        reranked: list[dict[str, Any]] = []
+        for row, score in zip(rows, scores):
+            copy = row.copy()
+            copy["rerank_score"] = score
+            reranked.append(copy)
+        reranked.sort(key=lambda row: float(row.get("rerank_score", 0.0)), reverse=True)
+        return reranked[:5]
+
+    def _format_history(self, history: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for message in history[-6:]:
+            role = str(message.get("role", "")).lower()
+            prefix = "User" if role == "user" else "Assistant"
+            content = str(message.get("content", "")).strip()
+            if content:
+                lines.append(f"{prefix}: {content}")
+        return "\n".join(lines)
+
+    def _format_context(self, chunks: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for chunk in chunks:
+            parts.append(
+                "---\n"
+                f"Source: {chunk.get('doc_name') or 'Unknown'} | "
+                f"Page: {chunk.get('page_number') or 'N/A'} | "
+                f"Type: {chunk.get('chunk_type') or 'text'}\n"
+                f"{chunk.get('content') or ''}\n"
+                "---"
+            )
+        return "\n\n".join(parts)
+
+    def _build_citations(self, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        citations: list[dict[str, Any]] = []
+        for chunk in chunks:
+            content = str(chunk.get("content") or "")
+            citations.append(
+                {
+                    "docId": str(chunk.get("doc_id") or ""),
+                    "docName": str(chunk.get("doc_name") or "Unknown"),
+                    "pageNumber": chunk.get("page_number"),
+                    "chunkIndex": chunk.get("chunk_index"),
+                    "relevanceScore": float(
+                        chunk.get("rerank_score", chunk.get("rrf_score", 0.0)) or 0.0
+                    ),
+                    "chunkPreview": content[:200],
+                    "isImageChunk": chunk.get("chunk_type") == "image_description",
+                }
+            )
+        return citations
+
+    def _build_filter_clause(self, filters: Any | None) -> str | None:
+        if not filters:
             return None
 
-        if len(clauses) == 1:
-            return clauses[0]
+        doc_ids = self._filter_value(filters, "doc_ids") or []
+        source_type = self._filter_value(filters, "source_type")
+        clauses: list[str] = []
 
-        # CODEX-FIX: this legacy filter builder is removed by the hybrid LanceDB RAG rewrite.
-        return {'$and': clauses}
-    
-    @log_execution_time(logger, "rag_query")
-    async def query(
-        self,
-        question: str,
-        equipment_type: Optional[str] = None,
-        voltage_level: Optional[str] = None,
-        doc_types: Optional[List[str]] = None,
-        top_k: Optional[int] = None,
-    ) -> RAGResponse:
-        """Execute a RAG query."""
-        try:
-            import time
-            start_time = time.time()
-            
-            # Build filters
-            filters = self._build_filters(equipment_type, voltage_level, doc_types)
-            
-            logger.info(
-                "rag_query_started",
-                question=question[:100],
-                filters=filters,
-                equipment_type=equipment_type,
-                voltage_level=voltage_level
-            )
-            
-            # Retrieve relevant documents (now async — fix #5)
-            retrieved_docs = await self.vector_store.similarity_search(
-                query=question,
-                k=top_k or settings.VECTOR_SEARCH_K,
-                filter_dict=filters,
-                score_threshold=settings.VECTOR_SEARCH_SCORE_THRESHOLD
-            )
-            
-            # Generate response (now async — fix #6)
-            llm_response = await self.llm_service.generate_response(question, retrieved_docs)
-            
-            # Calculate query time
-            query_time_ms = round((time.time() - start_time) * 1000, 2)
-            
-            # Check if information is insufficient
-            is_insufficient = (
-                not retrieved_docs or 
-                llm_response['confidence'] < 0.5 or
-                "don't have sufficient information" in llm_response['answer'].lower()
-            )
-            
-            logger.info(
-                "rag_query_completed",
-                question=question[:50],
-                documents_retrieved=len(retrieved_docs),
-                citations=len(llm_response['citations']),
-                confidence=llm_response['confidence'],
-                query_time_ms=query_time_ms
-            )
-            
-            return RAGResponse(
-                answer=llm_response['answer'],
-                citations=llm_response['citations'],
-                confidence=llm_response['confidence'],
-                model_used=llm_response['model_used'],
-                provider=llm_response['provider'],
-                query_time_ms=query_time_ms,
-                documents_retrieved=len(retrieved_docs),
-                is_insufficient=is_insufficient
-            )
-            
-        except Exception as e:
-            logger.error("rag_query_failed", error=str(e), question=question[:50])
-            raise RAGQueryError(
-                f"Query failed: {str(e)}",
-                query=question
-            )
-    
-    async def query_with_fallback(
-        self,
-        question: str,
-        equipment_type: Optional[str] = None,
-        voltage_level: Optional[str] = None,
-        doc_types: Optional[List[str]] = None,
-    ) -> RAGResponse:
-        """Execute query with smart fallback (fix #9).
+        if doc_ids:
+            escaped = ", ".join(repr(str(doc_id)) for doc_id in doc_ids)
+            clauses.append(f"doc_id IN ({escaped})")
 
-        Instead of 3 sequential full LLM+search passes, we:
-        1.  Do a single broad vector search (no filters, lower threshold)
-        2.  Re-rank results, boosting docs that match the requested filters
-        3.  Call the LLM once with the best results
+        if source_type:
+            clauses.append(f"source_type = '{self._escape_lancedb_literal(str(source_type))}'")
 
-        This cuts latency and LLM quota by ~3×.
-        """
-        import time
-        start_time = time.time()
+        return " AND ".join(clauses) if clauses else None
 
-        filters = self._build_filters(equipment_type, voltage_level, doc_types)
+    def _filter_value(self, filters: Any, key: str) -> Any:
+        if isinstance(filters, dict):
+            return filters.get(key)
+        return getattr(filters, key, None)
 
-        # Step 1: Try with filters first (fast path)
-        filtered_docs = await self.vector_store.similarity_search(
-            query=question,
-            k=settings.VECTOR_SEARCH_K,
-            filter_dict=filters,
-            score_threshold=settings.VECTOR_SEARCH_SCORE_THRESHOLD,
-        )
-
-        if filtered_docs and filtered_docs[0][1] >= 0.4:
-            # Good results with filters — use directly, one LLM call
-            llm_response = await self.llm_service.generate_response(question, filtered_docs)
-            query_time_ms = round((time.time() - start_time) * 1000, 2)
-
-            is_insufficient = (
-                not filtered_docs
-                or llm_response["confidence"] < 0.5
-                or "don't have sufficient information" in llm_response["answer"].lower()
-            )
-
-            return RAGResponse(
-                answer=llm_response["answer"],
-                citations=llm_response["citations"],
-                confidence=llm_response["confidence"],
-                model_used=llm_response["model_used"],
-                provider=llm_response["provider"],
-                query_time_ms=query_time_ms,
-                documents_retrieved=len(filtered_docs),
-                is_insufficient=is_insufficient,
-            )
-
-        # Step 2: Fallback — broad unfiltered search
-        logger.info("fallback_triggered", strategy="unfiltered_broad_search")
-
-        broad_docs = await self.vector_store.similarity_search(
-            query=question,
-            k=settings.VECTOR_SEARCH_K * 2,
-            filter_dict=None,
-            score_threshold=settings.VECTOR_SEARCH_SCORE_THRESHOLD,
-        )
-
-        # Re-rank: boost docs that match the original filter criteria
-        def _boost_score(doc_score_pair):
-            doc, score = doc_score_pair
-            meta = doc.metadata
-            bonus = 0.0
-            if equipment_type and meta.get("equipment_type", "").upper() == equipment_type.upper():
-                bonus += 0.05
-            if voltage_level and meta.get("voltage_level") == voltage_level:
-                bonus += 0.05
-            if doc_types and meta.get("doc_type") in doc_types:
-                bonus += 0.03
-            return score + bonus
-
-        broad_docs.sort(key=_boost_score, reverse=True)
-        best_docs = broad_docs[:settings.VECTOR_SEARCH_K]
-
-        # Step 3: One LLM call with best results
-        llm_response = await self.llm_service.generate_response(question, best_docs)
-        query_time_ms = round((time.time() - start_time) * 1000, 2)
-
-        is_insufficient = (
-            not best_docs
-            or llm_response["confidence"] < 0.5
-            or "don't have sufficient information" in llm_response["answer"].lower()
-        )
-
-        return RAGResponse(
-            answer=llm_response["answer"],
-            citations=llm_response["citations"],
-            confidence=llm_response["confidence"],
-            model_used=llm_response["model_used"],
-            provider=llm_response["provider"],
-            query_time_ms=query_time_ms,
-            documents_retrieved=len(best_docs),
-            is_insufficient=is_insufficient,
-        )
+    def _escape_lancedb_literal(self, value: str) -> str:
+        return value.replace("'", "''")
 
 
-# Singleton instance
-rag_engine = RAGEngine()
+_rag_engine: RAGEngine | None = None
+
+
+def get_rag_engine() -> RAGEngine:
+    global _rag_engine
+    if _rag_engine is None:
+        _rag_engine = RAGEngine()
+    return _rag_engine
+
+
+rag_engine = get_rag_engine()

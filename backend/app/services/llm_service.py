@@ -1,317 +1,231 @@
-"""LLM service for generating responses using Gemini or Groq."""
+"""LLM provider chain for POWERGRID SmartOps."""
+
+# CODEX-FIX: replace LangChain provider wrapper with direct async-safe Gemini, Groq, and HF failover.
 
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Optional, Tuple
+import logging
+from typing import Any, Callable
 
-import tiktoken
-from langchain.schema import Document as LangChainDocument
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
-from langchain.prompts import ChatPromptTemplate
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
-from app.core.exceptions import LLMError
-from app.core.logging import get_logger
+from app.core.exceptions import ServiceUnavailableError
 
-logger = get_logger(__name__)
-settings = get_settings()
-
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm")
+logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are a POWERGRID Operations Knowledge Assistant. Your role is to provide accurate, safety-critical information to field staff based on official CEA guidelines, POWERGRID technical manuals, and IT circulars.
-
-CRITICAL RULES:
-1. ONLY use information from the provided context documents
-2. If the answer is not in the context, say "I don't have sufficient information in the available documents to answer this question. Please refer to your supervisor or the official POWERGRID documentation."
-3. NEVER make up or infer technical specifications, maintenance intervals, or safety procedures
-4. Always cite the source document and page/reference number when available
-5. For maintenance-related questions, specify the exact interval, procedure reference, and equipment type
-6. Highlight safety warnings and precautions prominently
-
-When answering:
-- Be precise and technical (field staff need exact specifications)
-- Include voltage levels, equipment types, and standard references
-- Format maintenance intervals clearly (e.g., "Monthly", "Quarterly", "Annually")
-- Reference the document type (CEA Guideline, Technical Manual, IT Circular)"""
-
-
-RAG_PROMPT_TEMPLATE = """Context documents:
-{context}
-
-Question: {question}
-
-Provide a detailed, technical answer based strictly on the context above. Include specific citations with document names and reference numbers.
-
-If the context doesn't contain sufficient information, state that clearly.
-
-Answer:"""
-
-
-# Lazy-loaded tiktoken encoder for token counting.
-_tok_encoder = None
-
-
-def _get_encoder():
-    global _tok_encoder
-    if _tok_encoder is None:
-        try:
-            _tok_encoder = tiktoken.get_encoding("cl100k_base")
-        except Exception:
-            _tok_encoder = tiktoken.get_encoding("gpt2")
-    return _tok_encoder
-
-
-def _count_tokens(text: str) -> int:
-    """Return approximate token count for *text*."""
-    return len(_get_encoder().encode(text, disallowed_special=()))
+Message = dict[str, str]
+ProviderCall = Callable[[list[Message], str, str], tuple[str, str]]
 
 
 class LLMService:
-    """Handles LLM interactions for RAG responses."""
-    
+    """Generate responses through configured free-tier providers with failover."""
+
+    TIMEOUT_SECONDS = 30
+
     def __init__(self):
-        self.provider = settings.DEFAULT_LLM_PROVIDER.lower()
-        self.model_name = settings.DEFAULT_LLM_MODEL
-        self.llm = None
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
-            ("human", RAG_PROMPT_TEMPLATE)
-        ])
+        self.settings = get_settings()
+        self.last_provider: str | None = None
 
-    def _resolve_provider_and_model(self) -> Tuple[str, str]:
-        """Resolve provider/model with fallback to an available configured provider."""
-        requested = settings.DEFAULT_LLM_PROVIDER.lower()
+    async def complete(self, messages: list[Message], system: str = "") -> tuple[str, str]:
+        errors: list[str] = []
+        providers = self._provider_order()
 
-        if requested == "gemini" and settings.GOOGLE_API_KEY:
-            return "gemini", settings.DEFAULT_LLM_MODEL
+        for provider in providers:
+            for model in self._models_for(provider):
+                if not self._provider_configured(provider):
+                    errors.append(f"{provider}: missing API key")
+                    continue
+                try:
+                    text, provider_name = await asyncio.wait_for(
+                        self._complete_provider(provider, model, messages, system),
+                        timeout=self.TIMEOUT_SECONDS,
+                    )
+                    self.last_provider = provider_name
+                    return text, provider_name
+                except Exception as exc:
+                    message = f"{provider}/{model}: {exc}"
+                    logger.warning("LLM provider failed: %s", message)
+                    errors.append(message)
 
-        if requested == "groq" and settings.GROQ_API_KEY:
-            return "groq", settings.DEFAULT_LLM_MODEL
-
-        if settings.GOOGLE_API_KEY:
-            logger.warning(
-                "llm_provider_fallback",
-                requested=requested,
-                selected="gemini",
-                reason="requested_provider_not_configured",
-            )
-            return "gemini", "gemini-2.0-flash"
-
-        if settings.GROQ_API_KEY:
-            logger.warning(
-                "llm_provider_fallback",
-                requested=requested,
-                selected="groq",
-                reason="requested_provider_not_configured",
-            )
-            return "groq", "llama-3.1-70b-versatile"
-
-        raise LLMError(
-            "No LLM provider is configured. Set GOOGLE_API_KEY or GROQ_API_KEY.",
-            provider=requested,
+        raise ServiceUnavailableError(
+            "All LLM providers failed.",
+            details={"providers": errors},
         )
-    
-    def _initialize_llm(self):
-        """Initialize the LLM based on provider configuration."""
-        provider, model_name = self._resolve_provider_and_model()
 
+    def _provider_order(self) -> list[str]:
+        requested = self.settings.DEFAULT_LLM_PROVIDER.lower()
+        canonical = {
+            "gemini": "gemini",
+            "google": "gemini",
+            "groq": "groq",
+            "hf": "huggingface",
+            "huggingface": "huggingface",
+        }.get(requested, "gemini")
+        ordered = [canonical, "gemini", "groq", "huggingface"]
+        deduped: list[str] = []
+        for provider in ordered:
+            if provider not in deduped:
+                deduped.append(provider)
+        return deduped
+
+    def _models_for(self, provider: str) -> list[str]:
         if provider == "gemini":
-            if not settings.GOOGLE_API_KEY:
-                raise LLMError(
-                    "Google API key not configured",
-                    provider="gemini"
-                )
-            self.provider = provider
-            self.model_name = model_name
-            return ChatGoogleGenerativeAI(
-                model=model_name,
-                temperature=settings.RAG_TEMPERATURE,
-                max_output_tokens=settings.RAG_MAX_TOKENS,
-                top_p=settings.RAG_TOP_P,
-                google_api_key=settings.GOOGLE_API_KEY,
-            )
-        
+            primary = self.settings.DEFAULT_LLM_MODEL or "gemini-2.0-flash"
+            models = [primary, "gemini-2.0-flash", "gemini-1.5-flash"]
         elif provider == "groq":
-            if not settings.GROQ_API_KEY:
-                raise LLMError(
-                    "Groq API key not configured",
-                    provider="groq"
-                )
-            self.provider = provider
-            self.model_name = model_name
-            return ChatGroq(
-                model_name=model_name,
-                temperature=settings.RAG_TEMPERATURE,
-                max_tokens=settings.RAG_MAX_TOKENS,
-                api_key=settings.GROQ_API_KEY,
+            primary = (
+                self.settings.DEFAULT_LLM_MODEL
+                if self.settings.DEFAULT_LLM_PROVIDER.lower() == "groq"
+                else "llama-3.3-70b-versatile"
             )
-        
+            models = [primary, "llama-3.3-70b-versatile", "mixtral-8x7b-32768"]
         else:
-            raise LLMError(f"Unsupported LLM provider: {provider}")
+            models = ["meta-llama/Llama-3.3-70B-Instruct"]
 
-    def _get_or_initialize_llm(self):
-        """Initialize the provider lazily and cache it for subsequent requests."""
-        if self.llm is None:
-            self.llm = self._initialize_llm()
-        return self.llm
-    
-    def _format_context(
+        deduped: list[str] = []
+        for model in models:
+            if model and model not in deduped:
+                deduped.append(model)
+        return deduped
+
+    def _provider_configured(self, provider: str) -> bool:
+        if provider == "gemini":
+            return bool(self.settings.GOOGLE_API_KEY)
+        if provider == "groq":
+            return bool(self.settings.GROQ_API_KEY)
+        if provider == "huggingface":
+            return bool(self.settings.HF_API_TOKEN)
+        return False
+
+    async def _complete_provider(
         self,
-        documents: List[Tuple[LangChainDocument, float]]
-    ) -> str:
-        """Format retrieved documents into context string with token budget (#14).
+        provider: str,
+        model: str,
+        messages: list[Message],
+        system: str,
+    ) -> tuple[str, str]:
+        if provider == "gemini":
+            return await asyncio.to_thread(self._gemini_generate_with_retry, messages, system, model)
+        if provider == "groq":
+            return await asyncio.to_thread(self._groq_generate_with_retry, messages, system, model)
+        if provider == "huggingface":
+            return await asyncio.to_thread(self._hf_generate_with_retry, messages, system, model)
+        raise ValueError(f"Unsupported provider: {provider}")
 
-        Keeps the highest-scoring documents first and stops appending once
-        ``MAX_CONTEXT_TOKENS`` would be exceeded.
-        """
-        budget = settings.MAX_CONTEXT_TOKENS
-        context_parts: list[str] = []
-        tokens_used = 0
-        
-        for i, (doc, score) in enumerate(documents, 1):
-            metadata = doc.metadata
-            source = metadata.get('source', 'Unknown')
-            doc_type = metadata.get('doc_type', 'Document')
-            page = metadata.get('page', 'N/A')
-            chunk_idx = metadata.get('chunk_index', 0)
-            
-            context_part = f"""--- Document {i} (Relevance: {score:.2f}) ---
-Source: {source}
-Type: {doc_type}
-Page/Ref: {page}
-Chunk: {chunk_idx}
-
-{doc.page_content}
-"""
-            part_tokens = _count_tokens(context_part)
-            if tokens_used + part_tokens > budget and context_parts:
-                # Already have at least one doc; stop to avoid overflow.
-                logger.info(
-                    "context_budget_exceeded",
-                    docs_included=len(context_parts),
-                    docs_total=len(documents),
-                    tokens_used=tokens_used,
-                    budget=budget,
-                )
-                break
-
-            context_parts.append(context_part)
-            tokens_used += part_tokens
-        
-        return "\n\n".join(context_parts)
-    
-    def _generate_sync(
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8), reraise=True)
+    def _gemini_generate_with_retry(
         self,
-        question: str,
-        documents: List[Tuple[LangChainDocument, float]],
-    ) -> Dict[str, Any]:
-        """Synchronous LLM generation — runs inside thread pool."""
-        if not documents:
-            return {
-                "answer": (
-                    "I don't have sufficient information in the available documents "
-                    "to answer this question. Please refer to your supervisor or "
-                    "the official POWERGRID documentation."
-                ),
-                "citations": [],
-                "confidence": 0.0,
-                "model_used": self.model_name,
-                "provider": self.provider,
-            }
-        
-        # Resolve actual model (may differ from config after fallback) — fix #19
-        actual_provider, actual_model = self._resolve_provider_and_model()
+        messages: list[Message],
+        system: str,
+        model: str,
+    ) -> tuple[str, str]:
+        import google.generativeai as genai
 
-        # Format context with token budget
-        context = self._format_context(documents)
-        llm = self._get_or_initialize_llm()
-        
-        # Create chain and invoke
-        chain = self.prompt | llm
-        response = chain.invoke({
-            "context": context,
-            "question": question
-        })
-        
-        # Extract citations
-        citations = self._extract_citations(documents)
-        
-        # Calculate overall confidence
-        avg_score = sum(score for _, score in documents) / len(documents)
-        
-        logger.info(
-            "response_generated",
-            question=question[:50],
-            provider=actual_provider,
-            model=actual_model,
-            citations=len(citations),
-            confidence=round(avg_score, 3)
+        genai.configure(api_key=self.settings.GOOGLE_API_KEY)
+        gemini_model = genai.GenerativeModel(model_name=model, system_instruction=system or None)
+        prompt = self._flatten_messages(messages)
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.2},
+            request_options={"timeout": self.TIMEOUT_SECONDS},
         )
-        
-        return {
-            "answer": response.content,
-            "citations": citations,
-            "confidence": round(avg_score, 3),
-            "model_used": actual_model,
-            "provider": actual_provider,
-            "documents_used": len(documents),
-        }
+        text = getattr(response, "text", "") or ""
+        if not text.strip():
+            raise RuntimeError("empty Gemini response")
+        return text.strip(), f"gemini:{model}"
 
-    async def generate_response(
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8), reraise=True)
+    def _groq_generate_with_retry(
         self,
-        question: str,
-        documents: List[Tuple[LangChainDocument, float]],
-    ) -> Dict[str, Any]:
-        """Generate an LLM response (non-blocking — fix #6).
+        messages: list[Message],
+        system: str,
+        model: str,
+    ) -> tuple[str, str]:
+        from groq import Groq
 
-        Wraps the blocking LangChain chain invocation in ``run_in_executor``
-        so the event loop is never frozen.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                _executor, self._generate_sync, question, documents,
-            )
-        except LLMError:
-            raise
-        except Exception as e:
-            logger.error("llm_generation_failed", error=str(e), question=question[:50])
-            raise LLMError(
-                f"Failed to generate response: {str(e)}",
-                provider=self.provider,
-            )
-    
-    def _extract_citations(
+        client = Groq(api_key=self.settings.GROQ_API_KEY, timeout=self.TIMEOUT_SECONDS)
+        payload = self._openai_messages(messages, system)
+        response = client.chat.completions.create(
+            model=model,
+            messages=payload,
+            temperature=0.2,
+        )
+        text = response.choices[0].message.content or ""
+        if not text.strip():
+            raise RuntimeError("empty Groq response")
+        return text.strip(), f"groq:{model}"
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8), reraise=True)
+    def _hf_generate_with_retry(
         self,
-        documents: List[Tuple[LangChainDocument, float]]
-    ) -> List[Dict[str, Any]]:
-        """Extract citation information from documents."""
-        citations = []
-        
-        for doc, score in documents:
-            if score < settings.MIN_CITATION_SCORE:
-                continue
-                
-            metadata = doc.metadata
-            citation = {
-                "source": metadata.get('source', 'Unknown'),
-                "doc_type": metadata.get('doc_type', 'Unknown'),
-                "page": metadata.get('page', 'N/A'),
-                "chunk_index": metadata.get('chunk_index', 0),
-                "relevance_score": round(score, 3),
-                "equipment_type": metadata.get('equipment_type'),
-                "voltage_level": metadata.get('voltage_level'),
-                "text_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-            }
-            citations.append(citation)
-        
-        # Limit citations
-        return citations[:settings.MAX_CITATIONS]
+        messages: list[Message],
+        system: str,
+        model: str,
+    ) -> tuple[str, str]:
+        from huggingface_hub import InferenceClient
+
+        client = InferenceClient(model=model, token=self.settings.HF_API_TOKEN, timeout=self.TIMEOUT_SECONDS)
+        payload = self._openai_messages(messages, system)
+
+        if hasattr(client, "chat_completion"):
+            response = client.chat_completion(
+                messages=payload,
+                max_tokens=1024,
+                temperature=0.2,
+            )
+        else:
+            response = client.chat.completions.create(
+                model=model,
+                messages=payload,
+                max_tokens=1024,
+                temperature=0.2,
+            )
+
+        text = self._extract_hf_text(response)
+        if not text.strip():
+            raise RuntimeError("empty Hugging Face response")
+        return text.strip(), f"huggingface:{model}"
+
+    def _openai_messages(self, messages: list[Message], system: str) -> list[dict[str, str]]:
+        payload: list[dict[str, str]] = []
+        if system:
+            payload.append({"role": "system", "content": system})
+        payload.extend({"role": message["role"], "content": message["content"]} for message in messages)
+        return payload
+
+    def _flatten_messages(self, messages: list[Message]) -> str:
+        return "\n\n".join(
+            f"{message.get('role', 'user').title()}: {message.get('content', '')}"
+            for message in messages
+        )
+
+    def _extract_hf_text(self, response: Any) -> str:
+        if isinstance(response, str):
+            return response
+        if isinstance(response, dict):
+            choices = response.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                return str(message.get("content") or choices[0].get("text") or "")
+            return str(response.get("generated_text") or "")
+        choices = getattr(response, "choices", None)
+        if choices:
+            message = getattr(choices[0], "message", None)
+            return str(getattr(message, "content", "") or getattr(choices[0], "text", ""))
+        return str(getattr(response, "generated_text", ""))
 
 
-# Singleton instance
-llm_service = LLMService()
+_llm_service: LLMService | None = None
+
+
+def get_llm_service() -> LLMService:
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
+
+
+llm_service = get_llm_service()

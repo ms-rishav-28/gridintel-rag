@@ -44,6 +44,18 @@ class LLMError(PowergridException):
         )
 
 
+# CODEX-FIX: expose 503-class provider exhaustion for the LLM failover chain.
+class ServiceUnavailableError(PowergridException):
+    """Raised when all provider fallbacks are unavailable."""
+
+    def __init__(self, message: str, details: dict = None):
+        super().__init__(
+            message=message,
+            error_code="SERVICE_UNAVAILABLE",
+            details=details or {},
+        )
+
+
 class RAGQueryError(PowergridException):
     """Raised when RAG query fails."""
     
