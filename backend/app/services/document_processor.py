@@ -14,10 +14,9 @@ import hashlib
 import io
 import logging
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 from app.core.config import get_settings
 from app.services.convex_service import get_convex_service
@@ -34,6 +33,100 @@ class PDFParseStrategy(str, Enum):
     OCR = "ocr"
 
 
+@dataclass
+class _MarkdownChunk:
+    page_content: str
+    metadata: dict[str, str]
+
+
+class _MarkdownHeaderSplitter:
+    """Small Markdown header splitter compatible with the local ingestion needs."""
+
+    # CODEX-FIX: avoid langchain_text_splitters package-level optional imports at FastAPI startup.
+
+    def __init__(self, headers_to_split_on: list[tuple[str, str]], strip_headers: bool = False):
+        self._headers = sorted(headers_to_split_on, key=lambda item: len(item[0]), reverse=True)
+        self._levels = {key: len(prefix) for prefix, key in headers_to_split_on}
+        self._strip_headers = strip_headers
+
+    def split_text(self, text: str) -> list[_MarkdownChunk]:
+        chunks: list[_MarkdownChunk] = []
+        current_lines: list[str] = []
+        current_metadata: dict[str, str] = {}
+        active_metadata: dict[str, str] = {}
+
+        def flush() -> None:
+            content = "\n".join(current_lines).strip()
+            if content:
+                chunks.append(_MarkdownChunk(content, current_metadata.copy()))
+            current_lines.clear()
+
+        for line in text.splitlines():
+            matched = next(
+                (
+                    (prefix, key)
+                    for prefix, key in self._headers
+                    if line.startswith(f"{prefix} ")
+                ),
+                None,
+            )
+            if matched:
+                flush()
+                prefix, key = matched
+                level = self._levels[key]
+                active_metadata = {
+                    item_key: item_value
+                    for item_key, item_value in active_metadata.items()
+                    if self._levels.get(item_key, 0) < level
+                }
+                active_metadata[key] = line[len(prefix) :].strip()
+                current_metadata = active_metadata.copy()
+                if not self._strip_headers:
+                    current_lines.append(line)
+                continue
+            current_lines.append(line)
+
+        flush()
+        return chunks
+
+
+class _RecursiveCharacterSplitter:
+    """Character splitter with overlap and whitespace-aware boundaries."""
+
+    # CODEX-FIX: keep chunking deterministic without importing optional NLP backends.
+
+    def __init__(self, chunk_size: int, chunk_overlap: int):
+        self._chunk_size = chunk_size
+        self._chunk_overlap = min(chunk_overlap, max(chunk_size - 1, 0))
+
+    def split_text(self, text: str) -> list[str]:
+        cleaned = text.strip()
+        if not cleaned:
+            return []
+
+        chunks: list[str] = []
+        start = 0
+        text_length = len(cleaned)
+        while start < text_length:
+            end = min(start + self._chunk_size, text_length)
+            if end < text_length:
+                boundary = max(
+                    cleaned.rfind("\n\n", start, end),
+                    cleaned.rfind("\n", start, end),
+                    cleaned.rfind(". ", start, end),
+                    cleaned.rfind(" ", start, end),
+                )
+                if boundary > start + self._chunk_size // 2:
+                    end = boundary + 1
+            chunk = cleaned[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= text_length:
+                break
+            start = max(end - self._chunk_overlap, start + 1)
+        return chunks
+
+
 class DocumentProcessor:
     HEADERS_TO_SPLIT = [("#", "h1"), ("##", "h2"), ("###", "h3")]
     CHUNK_SIZE = 1500
@@ -41,12 +134,11 @@ class DocumentProcessor:
 
     def __init__(self):
         self._settings = get_settings()
-        self._splitter = RecursiveCharacterTextSplitter(
+        self._splitter = _RecursiveCharacterSplitter(
             chunk_size=self.CHUNK_SIZE,
             chunk_overlap=self.CHUNK_OVERLAP,
-            length_function=len,
         )
-        self._header_splitter = MarkdownHeaderTextSplitter(
+        self._header_splitter = _MarkdownHeaderSplitter(
             headers_to_split_on=self.HEADERS_TO_SPLIT,
             strip_headers=False,
         )

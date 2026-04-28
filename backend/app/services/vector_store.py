@@ -20,6 +20,9 @@ import logging
 import os
 from typing import Any
 
+# CODEX-FIX: keep LanceDB import-time config writes inside the app workspace.
+os.environ.setdefault("LANCEDB_CONFIG_DIR", os.path.abspath("./data/lancedb_config"))
+
 import lancedb
 from lancedb.pydantic import LanceModel, Vector
 
@@ -51,7 +54,7 @@ class VectorStore:
     TABLE_NAME = "powergrid_chunks"
 
     def __init__(self):
-        self._db: lancedb.AsyncConnection | None = None
+        self._db: Any | None = None
         self._table = None
         self._ready = False
 
@@ -61,12 +64,13 @@ class VectorStore:
         os.makedirs(path, exist_ok=True)
         logger.info("Initialising LanceDB at %s", path)
 
-        self._db = await lancedb.connect_async(path)
-        existing = await self._db.table_names()
+        # CODEX-FIX: LanceDB sync API is the stable API across 0.5.x and 0.13+; wrap at async boundary.
+        self._db = await asyncio.to_thread(lancedb.connect, path)
+        existing = await asyncio.to_thread(self._db.table_names)
 
         if self.TABLE_NAME in existing:
-            self._table = await self._db.open_table(self.TABLE_NAME)
-            schema = await self._table.schema()
+            self._table = await asyncio.to_thread(self._db.open_table, self.TABLE_NAME)
+            schema = await self._schema()
             vec_field = next((field for field in schema if field.name == "vector"), None)
             if vec_field is not None:
                 stored_dim = vec_field.type.list_size
@@ -75,28 +79,39 @@ class VectorStore:
                         "LanceDB embedding dimension mismatch: stored=%s current=1024",
                         stored_dim,
                     )
-                    await self._db.drop_table(self.TABLE_NAME)
+                    await asyncio.to_thread(self._db.drop_table, self.TABLE_NAME)
                     await self._create_table()
             logger.info(
                 "LanceDB table %s opened with %s rows",
                 self.TABLE_NAME,
-                await self._table.count_rows(),
+                await asyncio.to_thread(self._table.count_rows),
             )
         else:
             await self._create_table()
 
         self._ready = True
 
+    async def _schema(self):
+        schema = await asyncio.to_thread(lambda: self._table.schema)
+        if callable(schema):
+            return await asyncio.to_thread(schema)
+        return schema
+
     async def _create_table(self) -> None:
         """Create the table and enable full-text search index."""
         if self._db is None:
             raise RuntimeError("LanceDB connection is not initialized")
-        self._table = await self._db.create_table(
-            self.TABLE_NAME,
-            schema=ChunkRecord,
-            mode="overwrite",
+        self._table = await asyncio.to_thread(
+            lambda: self._db.create_table(
+                self.TABLE_NAME,
+                schema=ChunkRecord,
+                mode="overwrite",
+            )
         )
-        await self._table.create_fts_index("content", replace=True)
+        try:
+            await asyncio.to_thread(self._table.create_fts_index, "content", replace=True)
+        except Exception as exc:
+            logger.warning("LanceDB FTS index unavailable; dense search remains enabled: %s", exc)
         logger.info("Created LanceDB table %s", self.TABLE_NAME)
 
     def _ensure_ready(self) -> None:
@@ -121,10 +136,10 @@ class VectorStore:
     async def delete_by_doc_id(self, doc_id: str) -> int:
         """Delete all chunks for a document. Returns deleted row count."""
         self._ensure_ready()
-        before = await self._table.count_rows()
+        before = await asyncio.to_thread(self._table.count_rows)
         escaped_doc_id = doc_id.replace("'", "''")
-        await self._table.delete(f"doc_id = '{escaped_doc_id}'")
-        after = await self._table.count_rows()
+        await asyncio.to_thread(self._table.delete, f"doc_id = '{escaped_doc_id}'")
+        after = await asyncio.to_thread(self._table.count_rows)
         deleted = before - after
         logger.info("Deleted %s chunks for doc_id=%s", deleted, doc_id)
         return deleted
@@ -133,7 +148,7 @@ class VectorStore:
         """Wipe the entire table. Used before a full reindex."""
         if self._db is None:
             raise RuntimeError("LanceDB connection is not initialized")
-        await self._db.drop_table(self.TABLE_NAME)
+        await asyncio.to_thread(self._db.drop_table, self.TABLE_NAME)
         await self._create_table()
         self._ready = True
         logger.warning("lancedb_table_wiped_for_reindex")
@@ -148,10 +163,17 @@ class VectorStore:
     ) -> list[dict[str, Any]]:
         """ANN search using dense BGE-M3 embeddings."""
         self._ensure_ready()
-        query = self._table.vector_search(query_vector).limit(top_k)
-        if where:
-            query = query.where(where)
-        return await query.to_list()
+
+        def _search() -> list[dict[str, Any]]:
+            if hasattr(self._table, "vector_search"):
+                query = self._table.vector_search(query_vector).limit(top_k)
+            else:
+                query = self._table.search(query_vector).limit(top_k)
+            if where:
+                query = query.where(where)
+            return query.to_list()
+
+        return await asyncio.to_thread(_search)
 
     async def hybrid_search(
         self,
@@ -167,10 +189,16 @@ class VectorStore:
         self._ensure_ready()
         dense_results = await self.dense_search(query_vector, top_k * 2, where)
 
-        fts_query = self._table.fts_search(query_text).limit(top_k * 2)
-        if where:
-            fts_query = fts_query.where(where)
-        fts_results = await fts_query.to_list()
+        try:
+            fts_results = await asyncio.to_thread(
+                self._fts_search_sync,
+                query_text,
+                top_k * 2,
+                where,
+            )
+        except Exception as exc:
+            logger.warning("LanceDB FTS search unavailable; using dense-only search: %s", exc)
+            fts_results = []
 
         scores: dict[str, float] = {}
         records: dict[str, dict[str, Any]] = {}
@@ -194,14 +222,25 @@ class VectorStore:
 
         return merged
 
+    def _fts_search_sync(self, query_text: str, top_k: int, where: str | None) -> list[dict[str, Any]]:
+        if hasattr(self._table, "fts_search"):
+            query = self._table.fts_search(query_text).limit(top_k)
+        else:
+            query = self._table.search(query_text, query_type="fts").limit(top_k)
+        if where:
+            query = query.where(where)
+        return query.to_list()
+
     async def list_doc_ids(self) -> list[str]:
         self._ensure_ready()
-        rows = await self._table.query().select(["doc_id"]).to_list()
+        rows = await asyncio.to_thread(
+            lambda: self._table.search().select(["doc_id"]).to_list()
+        )
         return list({row["doc_id"] for row in rows})
 
     async def get_stats(self) -> dict[str, Any]:
         self._ensure_ready()
-        row_count = await self._table.count_rows()
+        row_count = await asyncio.to_thread(self._table.count_rows)
         db_path = settings.LANCEDB_PATH
         try:
             size_bytes = sum(

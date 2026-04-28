@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import mimetypes
 import sys
+import uuid
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -30,11 +33,11 @@ BACKEND_DIR = REPO_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.core.exceptions import DocumentProcessingError, VectorStoreError
 from app.core.logging import get_logger, setup_logging
-from app.services.convex_service import convex_service
-from app.services.document_processor import document_processor
-from app.services.vector_store import vector_store
+from app.services.convex_service import get_convex_service
+from app.services.document_processor import get_document_processor
+from app.services.vector_store import get_vector_store
+from app.services.web_ingestion import ingest_url
 
 logger = get_logger(__name__)
 SUPPORTED_SOURCE_TYPES = {"pdf_catalog", "webpage", "wikipedia"}
@@ -64,6 +67,9 @@ class CatalogIngestionRunner:
         self.catalog_path = Path(args.catalog_path)
         self.report_path = self._resolve_report_path(args.report_path)
         self.existing_doc_ids: Set[str] = set()
+        # CODEX-FIX: track durable Convex identifiers after moving ingestion to UUID doc IDs.
+        self.existing_source_urls: Set[str] = set()
+        self.existing_hashes: Set[str] = set()
         self.http_timeout = httpx.Timeout(timeout=25.0, connect=10.0, read=20.0)
         self.verify_tls = not args.allow_insecure_tls
 
@@ -144,7 +150,8 @@ class CatalogIngestionRunner:
             response = await client.get(page_url, follow_redirects=True)
             response.raise_for_status()
         except Exception as e:
-            logger.warning("pdf_catalog_fetch_failed", page_url=page_url, error=str(e))
+            # CODEX-FIX: stdlib logger does not accept structlog-style keyword fields.
+            logger.warning("pdf_catalog_fetch_failed page_url=%s error=%s", page_url, e)
             return []
 
         extractor = AnchorLinkExtractor()
@@ -201,33 +208,137 @@ class CatalogIngestionRunner:
         # webpage and wikipedia directly ingest the listed URLs.
         return base_urls[: self.args.max_urls_per_source]
 
-    def _load_existing_doc_ids(self) -> None:
+    async def _load_existing_doc_ids(self) -> None:
         if self.args.dry_run:
             return
 
         doc_ids: Set[str] = set()
         try:
-            convex_docs = convex_service.list_documents()
+            convex_docs = await get_convex_service().list_documents()
             for doc in convex_docs:
-                doc_id = doc.get("doc_id")
+                doc_id = doc.get("docId") or doc.get("doc_id")
                 if doc_id:
                     doc_ids.add(doc_id)
+                source_url = doc.get("sourceUrl") or doc.get("source_url")
+                if source_url:
+                    self.existing_source_urls.add(source_url)
+                sha256 = doc.get("sha256")
+                if sha256:
+                    self.existing_hashes.add(sha256)
         except Exception as e:
-            logger.warning("existing_docs_convex_list_failed", error=str(e))
+            logger.warning("existing_docs_convex_list_failed error=%s", e)
 
         if not doc_ids:
             try:
-                vector_docs = vector_store.list_documents()
-                for doc in vector_docs:
-                    doc_id = doc.get("doc_id")
-                    if doc_id:
-                        doc_ids.add(doc_id)
+                vector_doc_ids = await get_vector_store().list_doc_ids()
+                doc_ids.update(vector_doc_ids)
             except Exception as e:
-                logger.warning("existing_docs_vector_list_failed", error=str(e))
+                logger.warning("existing_docs_vector_list_failed error=%s", e)
 
         self.existing_doc_ids = doc_ids
 
-    async def _ingest_single_url(self, source: Dict[str, Any], url: str) -> Dict[str, Any]:
+    async def _store_file_in_convex(
+        self,
+        client: httpx.AsyncClient,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str,
+    ) -> str | None:
+        """Store downloaded catalog files in Convex so reindex can rebuild LanceDB."""
+        convex = get_convex_service()
+        if not convex.enabled:
+            return None
+
+        upload_url = await convex.generate_upload_url()
+        if not upload_url:
+            raise RuntimeError("Convex upload URL could not be generated")
+
+        # CODEX-FIX: preserve catalog-downloaded originals in Convex File Storage.
+        response = await client.post(
+            upload_url,
+            content=file_bytes,
+            headers={"Content-Type": content_type or "application/octet-stream"},
+        )
+        response.raise_for_status()
+        storage_id = response.json().get("storageId")
+        if not storage_id:
+            raise RuntimeError(f"Convex storage upload for {filename} did not return storageId")
+        return storage_id
+
+    async def _ingest_downloaded_file(
+        self,
+        client: httpx.AsyncClient,
+        source: Dict[str, Any],
+        url: str,
+    ) -> Dict[str, Any]:
+        source_id = source.get("id", "unknown")
+        response = await client.get(url, follow_redirects=True)
+        response.raise_for_status()
+
+        file_bytes = response.content
+        sha256 = hashlib.sha256(file_bytes).hexdigest()
+        if not self.args.allow_duplicate_doc_ids and sha256 in self.existing_hashes:
+            return {
+                "status": "skipped_duplicate",
+                "source_id": source_id,
+                "url": url,
+                "reason": "sha256 already exists in Convex",
+            }
+
+        doc_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
+        parsed = urlparse(url)
+        filename = Path(parsed.path).name or f"{source_id}.pdf"
+        content_type = response.headers.get("content-type") or mimetypes.guess_type(filename)[0] or "application/pdf"
+        storage_id = await self._store_file_in_convex(client, file_bytes, filename, content_type)
+
+        convex = get_convex_service()
+        await convex.create_document(
+            doc_id=doc_id,
+            name=filename,
+            source_type="pdf",
+            source_url=url,
+            storage_id=storage_id,
+            file_size_bytes=len(file_bytes),
+            sha256=sha256,
+        )
+        await convex.create_job(job_id=job_id, source_type="pdf", doc_id=doc_id, source_url=url)
+
+        result = await get_document_processor().ingest_file(
+            file_bytes=file_bytes,
+            filename=filename,
+            doc_id=doc_id,
+            job_id=job_id,
+            storage_id=storage_id,
+        )
+        if result.get("error"):
+            return {
+                "status": "failed",
+                "source_id": source_id,
+                "url": url,
+                "doc_id": doc_id,
+                "error": result["error"],
+                "details": {},
+            }
+
+        self.existing_doc_ids.add(doc_id)
+        self.existing_hashes.add(sha256)
+        return {
+            "status": "ingested",
+            "source_id": source_id,
+            "url": url,
+            "doc_id": doc_id,
+            "filename": filename,
+            "chunks_processed": result.get("chunk_count", 0),
+            "doc_type": "pdf",
+        }
+
+    async def _ingest_single_url(
+        self,
+        client: httpx.AsyncClient,
+        source: Dict[str, Any],
+        url: str,
+    ) -> Dict[str, Any]:
         source_id = source.get("id", "unknown")
 
         if self.args.dry_run:
@@ -237,76 +348,71 @@ class CatalogIngestionRunner:
                 "url": url,
             }
 
-        custom_metadata = self._build_source_metadata(source)
+        # CODEX-FIX: route catalog ingestion through the current web/file pipelines.
+        if self._looks_like_pdf_link(url):
+            try:
+                return await self._ingest_downloaded_file(client, source, url)
+            except Exception as e:
+                return {
+                    "status": "failed",
+                    "source_id": source_id,
+                    "url": url,
+                    "error": str(e),
+                    "details": {},
+                }
 
-        try:
-            processed = await document_processor.process_url(
-                url,
-                custom_metadata,
-                verify_ssl=self.verify_tls,
-            )
-        except DocumentProcessingError as e:
-            return {
-                "status": "failed",
-                "source_id": source_id,
-                "url": url,
-                "error": e.message,
-                "details": e.details,
-            }
-        except Exception as e:
-            return {
-                "status": "failed",
-                "source_id": source_id,
-                "url": url,
-                "error": str(e),
-                "details": {},
-            }
-
-        if not self.args.allow_duplicate_doc_ids and processed.doc_id in self.existing_doc_ids:
+        if not self.args.allow_duplicate_doc_ids and url in self.existing_source_urls:
             return {
                 "status": "skipped_duplicate",
                 "source_id": source_id,
                 "url": url,
-                "doc_id": processed.doc_id,
+                "reason": "sourceUrl already exists in Convex",
             }
 
+        doc_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
+        convex = get_convex_service()
+        title = source.get("title") or urlparse(url).netloc
+
         try:
-            chunks_added = vector_store.add_documents(processed.chunks, processed.doc_id)
-            convex_service.save_document_metadata(
-                processed.doc_id,
-                {
-                    **processed.metadata,
-                    "chunks_count": chunks_added,
-                },
+            await convex.create_document(
+                doc_id=doc_id,
+                name=title,
+                source_type="webpage",
+                source_url=url,
             )
-            self.existing_doc_ids.add(processed.doc_id)
-        except VectorStoreError as e:
-            return {
-                "status": "failed",
-                "source_id": source_id,
-                "url": url,
-                "doc_id": processed.doc_id,
-                "error": str(e),
-                "details": {},
-            }
+            await convex.create_job(job_id=job_id, source_type="webpage", doc_id=doc_id, source_url=url)
+            result = await ingest_url(url, doc_id, job_id)
         except Exception as e:
             return {
                 "status": "failed",
                 "source_id": source_id,
                 "url": url,
-                "doc_id": processed.doc_id,
+                "doc_id": doc_id,
                 "error": str(e),
                 "details": {},
             }
 
+        if result.get("error"):
+            return {
+                "status": "failed",
+                "source_id": source_id,
+                "url": url,
+                "doc_id": doc_id,
+                "error": result["error"],
+                "details": {},
+            }
+
+        self.existing_doc_ids.add(doc_id)
+        self.existing_source_urls.add(url)
         return {
             "status": "ingested",
             "source_id": source_id,
             "url": url,
-            "doc_id": processed.doc_id,
-            "filename": processed.metadata.get("source"),
-            "chunks_processed": chunks_added,
-            "doc_type": processed.metadata.get("doc_type"),
+            "doc_id": doc_id,
+            "filename": result.get("page_title") or title,
+            "chunks_processed": result.get("chunk_count", 0),
+            "doc_type": "webpage",
         }
 
     async def run(self) -> Dict[str, Any]:
@@ -317,7 +423,10 @@ class CatalogIngestionRunner:
         if not selected_sources:
             raise ValueError("No catalog sources matched your filters.")
 
-        self._load_existing_doc_ids()
+        if not self.args.dry_run:
+            # CODEX-FIX: standalone script must initialise LanceDB outside FastAPI lifespan.
+            await get_vector_store().initialize()
+        await self._load_existing_doc_ids()
 
         report: Dict[str, Any] = {
             "catalog_version": catalog.get("catalog_version"),
@@ -375,7 +484,7 @@ class CatalogIngestionRunner:
 
                 for url in candidate_urls:
                     report["totals"]["urls_attempted"] += 1
-                    item_result = await self._ingest_single_url(source, url)
+                    item_result = await self._ingest_single_url(client, source, url)
                     source_result["urls"].append(item_result)
 
                     status = item_result.get("status")
@@ -473,7 +582,7 @@ def main() -> int:
     try:
         report = asyncio.run(runner.run())
     except Exception as e:
-        logger.error("catalog_ingestion_failed", error=str(e))
+        logger.error("catalog_ingestion_failed error=%s", e)
         print(f"ERROR: {e}")
         return 1
 

@@ -29,9 +29,9 @@
 
 ## Current Validation Snapshot
 
-- Live smoke checks passing: `/ping`, `/api/v1/health`, `/api/v1/metadata/options`, `/api/v1/query`
-- End-to-end workflow verified: document upload → query with citations → document delete
-- Frontend to backend auth supported via `X-API-Key` header when `BACKEND_API_KEY` is configured
+- CODEX-FIX: Local preflight covers backend compilation, route import, Convex typecheck attempts, and Vite production build.
+- Production smoke checks after deployment should cover `/ping`, `/api/v1/health`, `/api/v1/query`, `/api/v1/documents/upload`, `/api/v1/documents/upload-url`, and `/api/v1/admin/reindex`.
+- Frontend to backend auth is supported via the `X-API-Key` header when `BACKEND_API_KEY` is configured.
 
 ---
 
@@ -39,17 +39,18 @@
 
 - **Node.js** ≥ 18
 - **Python** ≥ 3.10
-- **Google Gemini API Key** (or Groq)
+- **Google Gemini API Key** with Groq and Hugging Face fallback keys recommended
+- **Convex Project** for persistent documents, chat, settings, and file storage
 - **Railway Account** (free tier works, Starter recommended)
 - **Vercel Account** (free tier)
 
 ---
 
-## 1. Optional Convex Setup
+## 1. Convex Setup
 
-Convex is optional. The frontend now works directly with Railway APIs, and backend storage gracefully falls back to in-memory mode when Convex is not configured.
+Convex is required for production persistence. It stores chat history, document metadata, ingestion jobs, settings, and original uploaded files for LanceDB rebuilds.
 
-Use Convex only if you want durable chat/settings/document metadata across backend restarts.
+The backend can start without `CONVEX_URL` for local smoke tests, but that mode is not production-ready because history, documents, and reindex source files will not survive restarts.
 
 ### Create Convex Project
 1. Go to [Convex Dashboard](https://dashboard.convex.dev/)
@@ -71,9 +72,9 @@ npx convex deploy
 ### Collect Convex Connection Values
 - `VITE_CONVEX_URL`: your Convex deployment URL (for frontend)
 - `CONVEX_URL`: same deployment URL for backend server integration
-- `CONVEX_ADMIN_KEY`: optional admin token if you want server-to-server privileged access
+- `CONVEX_ADMIN_KEY`: admin token for server-to-server privileged access
 
-If `CONVEX_URL` is not set in backend, persistence falls back to in-memory storage.
+Set both backend and frontend Convex URLs before production deployment.
 
 ---
 
@@ -98,6 +99,7 @@ Set these in **Variables** tab:
 | `CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) | Required for persistence |
 | `CONVEX_ADMIN_KEY` | Convex admin key for server mutations | Recommended |
 | `LANCEDB_PATH` | `/data/lancedb` | Required on Railway |
+| `LANCEDB_CONFIG_DIR` | `/data/lancedb_config` | Recommended |
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | Required |
 | `EMBEDDING_DEVICE` | `cpu` | Required |
 | `VISION_MODEL` | `microsoft/Florence-2-base` | Required |
@@ -151,11 +153,12 @@ curl https://your-railway-url.up.railway.app/api/v1/health
 |---|---|
 | `VITE_API_URL` | `https://your-railway-url.up.railway.app/api/v1` |
 | `VITE_BACKEND_API_KEY` | Same value as Railway `BACKEND_API_KEY` |
+| `VITE_CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) |
 
-`VITE_CONVEX_URL` is optional and only needed if you are running the legacy direct-Convex frontend mode.
+The React app uses Convex for live document/session state and Railway for secured ingestion/query APIs.
 
 ### Verify
-Visit your Vercel URL → you should see the GridIntel dashboard.
+Visit your Vercel URL to verify the POWERGRID SmartOps dashboard loads.
 
 ---
 
@@ -250,11 +253,14 @@ powergrid-rag/
 │   │   │   ├── exceptions.py      # Custom exception hierarchy
 │   │   │   └── logging.py         # Structured logging
 │   │   ├── services/
-│   │   │   ├── document_processor.py  # PDF/DOCX → chunks
 │   │   │   ├── convex_service.py      # Convex persistence layer
-│   │   │   ├── llm_service.py         # Gemini/Groq integration
-│   │   │   ├── rag_engine.py          # RAG orchestrator
-│   │   │   └── vector_store.py        # LanceDB vector index
+│   │   │   ├── document_processor.py  # PDF/DOCX/TXT parsing, chunking, images
+│   │   │   ├── embedding_service.py   # BGE-M3 embeddings
+│   │   │   ├── llm_service.py         # Gemini/Groq/HF provider chain
+│   │   │   ├── rag_engine.py          # Hybrid retrieval and reranking
+│   │   │   ├── vector_store.py        # LanceDB vector index
+│   │   │   ├── vision_service.py      # Florence-2 image understanding
+│   │   │   └── web_ingestion.py       # Tiered URL ingestion
 │   │   └── main.py                # FastAPI app entry point
 │   ├── railway.json               # Railway deployment config
 │   ├── Procfile                   # Gunicorn start command
@@ -266,6 +272,7 @@ powergrid-rag/
 │   │   ├── schema.ts              # Convex data model
 │   │   ├── chat.ts                # Chat/session queries + mutations
 │   │   ├── documents.ts           # Document metadata queries + mutations
+│   │   ├── jobs.ts                # Ingestion job queries + mutations
 │   │   └── settings.ts            # Settings queries + mutations
 │   ├── src/
 │   │   ├── components/
@@ -304,18 +311,19 @@ When `BACKEND_API_KEY` is set, include `X-API-Key: <your-key>` in client request
 |---|---|---|
 | `POST` | `/api/v1/query` | RAG query with citations |
 | `POST` | `/api/v1/documents/upload` | Upload & ingest a document |
-| `POST` | `/api/v1/documents/upload-url` | Ingest a public URL (HTML/TXT/PDF/DOCX/DOC) |
-| `POST` | `/api/v1/documents/batch-upload` | Batch upload |
+| `POST` | `/api/v1/documents/upload-url` | Ingest a public URL |
+| `GET` | `/api/v1/documents` | List all ingested documents |
 | `GET` | `/api/v1/documents/list` | List all ingested documents |
 | `DELETE` | `/api/v1/documents/{doc_id}` | Delete a document |
-| `POST` | `/api/v1/chat/message` | Persist a chat message |
-| `GET` | `/api/v1/chat/history/{session_id}` | Retrieve chat history |
+| `GET` | `/api/v1/jobs/{job_id}` | Fetch ingestion job status |
+| `POST` | `/api/v1/chat/sessions` | Create a chat session |
 | `GET` | `/api/v1/chat/sessions` | List all chat sessions |
+| `GET` | `/api/v1/chat/sessions/{session_id}/messages` | Retrieve chat messages |
+| `DELETE` | `/api/v1/chat/sessions/{session_id}` | Delete a chat session |
 | `GET` | `/api/v1/settings` | Get user settings |
 | `POST` | `/api/v1/settings` | Save user settings |
-| `GET` | `/api/v1/metadata/options` | Get filter/upload metadata options |
 | `GET` | `/api/v1/health` | Health check |
-| `GET` | `/api/v1/stats` | System statistics |
+| `POST` | `/api/v1/admin/reindex` | Rebuild LanceDB from Convex files and URLs |
 | `GET` | `/ping` | Load balancer ping |
 | `GET` | `/docs` | Swagger UI |
 
@@ -345,9 +353,9 @@ cd ..
 curl https://YOUR-BACKEND/ping
 curl https://YOUR-BACKEND/api/v1/health
 
-# Metadata and documents
-curl https://YOUR-BACKEND/api/v1/metadata/options
+# Documents and reindex
 curl https://YOUR-BACKEND/api/v1/documents/list
+curl -X POST -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/admin/reindex
 
 # Optional: with API key if BACKEND_API_KEY is enabled
 curl -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/health
@@ -364,12 +372,11 @@ curl -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/health
 
 ### "Convex not configured" warning in backend logs
 - Set `CONVEX_URL` (and optionally `CONVEX_ADMIN_KEY`) in Railway env vars
-- Without it, the app runs in memory-only mode (data lost on restart)
+- Without it, local smoke tests can run, but production persistence and reindex are not available.
 
 ### Cold start takes 30+ seconds
-- First request loads the sentence-transformers ML model (~90MB)
-- Subsequent requests are fast (<2s for queries)
-- Railway Starter tier ($5/mo) keeps the service warm
+- First ingestion/query loads BGE-M3, the reranker, and optionally Florence-2.
+- Railway Starter tier ($5/mo) is recommended for the model memory footprint.
 
 ### 401 Unauthorized from API routes
 - Set the same value for Railway `BACKEND_API_KEY` and Vercel `VITE_BACKEND_API_KEY`
@@ -377,7 +384,7 @@ curl -H "X-API-Key: YOUR_BACKEND_API_KEY" https://YOUR-BACKEND/api/v1/health
 
 ### Document upload fails
 - Check file type is `.pdf`, `.docx`, `.doc`, or `.txt`
-- Max file size is 50MB (configurable via `MAX_UPLOAD_SIZE_MB`)
+- Max file size is 150MB by default (configurable via `MAX_UPLOAD_SIZE_MB`)
 
 ### URL ingestion fails
 - Use a public `http://` or `https://` URL (localhost/private network targets are blocked)
