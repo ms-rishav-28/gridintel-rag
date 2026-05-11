@@ -51,12 +51,17 @@ ENV/
 env.bak/
 venv.bak/
 
-# Environment variables
+# Environment variables (CRITICAL: Never commit secrets)
 .env
 .env.local
 .env.development.local
 .env.test.local
+.env.production
+.env.production.local
+.env.*.local
+.env.*.production
 !.env.example
+!.env.*.example
 
 # Stitch exports (reference only, not needed in production)
 stitch_ui_exports/
@@ -73,9 +78,32 @@ coverage.xml
 *.py,cover
 .hypothesis/
 
-# Data
+# Data & Vector Stores
 data/
 *.sqlite3
+*.lance/
+.parquet
+
+# Secrets & Keys
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+
+# Convex
+.convex/
+convex/.env.local
+frontend/convex/_generated/
+frontend/.env.local
+
+# LanceDB
+data/lancedb/
+data/uploads/
+
+# Build artifacts
+frontend/dist/
+*.zip
 
 # Vercel
 .vercel

@@ -46,6 +46,44 @@
 
 ---
 
+## Full Functionality (Required Wiring)
+
+If you want the complete experience (durable chat history, document metadata, ingestion jobs,
+settings persistence, file storage, and reindex), you must complete all steps below.
+Running without these will start, but it is a degraded, memory-only mode.
+
+### 1) Link and deploy Convex
+From the frontend folder:
+
+```bash
+cd frontend
+npx convex dev
+npx convex deploy
+```
+
+### 2) Configure environment variables
+
+**Backend (backend/.env or Railway variables)**
+
+- `CONVEX_URL` (required)
+- `CONVEX_ADMIN_KEY` (required for server-side writes + file storage)
+- `BACKEND_API_KEY` (required if you want protected API routes)
+- `FRONTEND_URL` (required for CORS)
+- `GOOGLE_API_KEY` (or `GROQ_API_KEY` / `HF_API_TOKEN` if using those providers)
+
+**Frontend (frontend/.env or Vercel variables)**
+
+- `VITE_API_URL` (your backend `/api/v1` base URL)
+- `VITE_BACKEND_API_KEY` (must match `BACKEND_API_KEY` above)
+- `VITE_CONVEX_URL` (same Convex URL as backend)
+
+### 3) Start services and ingest
+
+- Start the backend and frontend.
+- Upload at least one document or URL so LanceDB has indexed content.
+
+---
+
 ## 1. Convex Setup
 
 Convex is required for production persistence. It stores chat history, document metadata, ingestion jobs, settings, and original uploaded files for LanceDB rebuilds.
@@ -130,10 +168,10 @@ If `BACKEND_API_KEY` is configured, all non-exempt API routes require the `X-API
 
 ### Verify Deployment
 ```bash
-curl https://your-railway-url.up.railway.app/ping
+curl https://<your-railway-app>.up.railway.app/ping
 # → {"status":"ok"}
 
-curl https://your-railway-url.up.railway.app/api/v1/health
+curl https://<your-railway-app>.up.railway.app/api/v1/health
 # → {"status":"healthy","version":"1.0.0",...}
 ```
 
@@ -151,14 +189,21 @@ curl https://your-railway-url.up.railway.app/api/v1/health
 ### Environment Variables (Vercel Dashboard)
 | Variable | Value |
 |---|---|
-| `VITE_API_URL` | `https://your-railway-url.up.railway.app/api/v1` |
+| `VITE_API_URL` | `https://<your-railway-app>.up.railway.app/api/v1` |
 | `VITE_BACKEND_API_KEY` | Same value as Railway `BACKEND_API_KEY` |
-| `VITE_CONVEX_URL` | Convex deployment URL (`https://...convex.cloud`) |
+| `VITE_CONVEX_URL` | `https://optimistic-crow-128.convex.cloud` |
 
 The React app uses Convex for live document/session state and Railway for secured ingestion/query APIs.
 
 ### Verify
 Visit your Vercel URL to verify the POWERGRID SmartOps dashboard loads.
+
+### Recommended production host mapping
+- Frontend: `https://gridintel-rag.vercel.app`
+- Backend: your Railway public app URL, exposed as `https://<your-railway-app>.up.railway.app`
+- Convex: `https://optimistic-crow-128.convex.cloud`
+
+Set `VITE_API_URL` to the full Railway public URL. The frontend is not using a Vercel proxy for `/api/v1`, so a direct backend URL is required.
 
 ---
 
